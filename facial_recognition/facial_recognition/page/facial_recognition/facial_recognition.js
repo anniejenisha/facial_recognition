@@ -63,8 +63,10 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
         // and shown as-is rather than being labeled "District".
         let district = addr.state_district || addr.district;
         if (district) {
-            let distClean = district.replace(/ District/i, '');
-            parts.push(`${distClean} District`);
+            // Strip any existing "District" word (any casing/spacing) before
+            // re-appending our own, so we never end up with it duplicated.
+            let distClean = district.replace(/\s*district\s*/gi, '').trim();
+            if (distClean) parts.push(`${distClean} District`);
         } else if (addr.county) {
             parts.push(addr.county);
         }
@@ -182,7 +184,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
             }
 
             // Fetch dynamic address from live coordinates
-            fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${currentCoordinates.latitude}&lon=${currentCoordinates.longitude}`)
+            fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${currentCoordinates.latitude}&lon=${currentCoordinates.longitude}&accept-language=en`)
                 .then(response => response.json())
                 .then(data => {
                     let addressLines = parseDynamicAddress(data);
