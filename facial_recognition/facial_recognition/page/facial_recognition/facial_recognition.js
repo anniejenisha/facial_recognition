@@ -18,6 +18,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
 
     let currentCoordinates = { latitude: null, longitude: null, accuracy: null };
     let currentActionState = "IN"; // Default logic tracking status parameter
+    let currentAddressText = ""; // Flat, single-line address kept for backend submission / title attr
 
     // Accuracy threshold (in meters). Above this, we treat the fix as
     // network/IP-based rather than real GPS, and block check-in.
@@ -64,7 +65,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
         // 5. Postal Pin Code
         if (addr.postcode) parts.push(addr.postcode);
 
-        return parts.length > 0 ? parts.join(", ") : (data.display_name || "Location details logged");
+        return parts.length > 0 ? parts : (data.display_name ? [data.display_name] : ["Location details logged"]);
     }
 
     // Initialize View State Engine
@@ -103,7 +104,8 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
 
         if (isLikelyDesktopDevice()) {
             $('#emp-location').html('<span class="text-danger">Unavailable on desktop</span>');
-            $('#emp-address').text('Please check in from your mobile phone with GPS enabled');
+            currentAddressText = 'Please check in from your mobile phone with GPS enabled';
+            $('#emp-address').text(currentAddressText);
         } else {
             fetchLocation();
         }
@@ -136,12 +138,14 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
     function fetchLocation() {
         if (!navigator.geolocation) {
             $('#emp-location').html('<span class="text-danger">Geolocation not supported</span>');
-            $('#emp-address').text('Geolocation not supported by this browser');
+            currentAddressText = 'Geolocation not supported by this browser';
+            $('#emp-address').text(currentAddressText);
             return;
         }
 
         $('#emp-location').html('Fetching GPS...');
-        $('#emp-address').text('Fetching address details...');
+        currentAddressText = 'Fetching address details...';
+        $('#emp-address').text(currentAddressText);
 
         navigator.geolocation.getCurrentPosition(function(position) {
             currentCoordinates.latitude = position.coords.latitude;
@@ -171,18 +175,28 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
             fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${currentCoordinates.latitude}&lon=${currentCoordinates.longitude}`)
                 .then(response => response.json())
                 .then(data => {
-                    let cleanAddress = parseDynamicAddress(data);
-                    $('#emp-address').text(cleanAddress).attr('title', cleanAddress);
+                    let addressLines = parseDynamicAddress(data);
+
+                    // Keep a flat, single-line copy for the title attribute and backend payload
+                    currentAddressText = addressLines.join(", ");
+
+                    // Render each address component on its own line
+                    let addressHtml = addressLines
+                        .map(line => `<div class="address-line">${frappe.utils.escape_html(line)}</div>`)
+                        .join("");
+                    $('#emp-address').html(addressHtml).attr('title', currentAddressText);
                 })
                 .catch(err => {
                     console.error("Reverse geocoding error:", err);
-                    $('#emp-address').text(`${latLngStr} (Address service offline)`);
+                    currentAddressText = `${latLngStr} (Address service offline)`;
+                    $('#emp-address').text(currentAddressText);
                 });
 
         }, function(error) {
             currentCoordinates = { latitude: null, longitude: null, accuracy: null };
             $('#emp-location').html('<span class="text-danger">Location Access Denied</span>');
-            $('#emp-address').text('Location Access Denied');
+            currentAddressText = 'Location Access Denied';
+            $('#emp-address').text(currentAddressText);
         }, {
             enableHighAccuracy: true,   // Forces GPS chip usage where available, instead of cheap WiFi/IP lookup
             timeout: 15000,
@@ -306,7 +320,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                                 latitude: currentCoordinates.latitude,
                                 longitude: currentCoordinates.longitude,
                                 accuracy: currentCoordinates.accuracy,
-                                address: $('#emp-address').text().trim(),
+                                address: currentAddressText.trim(),
                                 log_type: currentActionState
                             },
                             freeze: true,
