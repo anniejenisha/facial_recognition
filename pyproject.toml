@@ -66,4 +66,4 @@ docstring-code-format = true
 
 
 [tool.bench.frappe-dependencies]
-frappe = "version-16"
+frappe = "~=16.0.0"
