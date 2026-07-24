@@ -52,11 +52,21 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
         let cityOrTown = addr.town || addr.city || addr.subdistrict || addr.municipality;
         if (cityOrTown && cityOrTown !== localArea) parts.push(cityOrTown);
 
-        // 3. District / County
-        let district = addr.county || addr.state_district || addr.district;
+        // 3. District (prefer the genuine administrative district)
+        //
+        // NOTE: For Indian addresses, Nominatim's `county` field is very often
+        // a taluk / sub-district (e.g. "Tiruchendur"), NOT the revenue district.
+        // Blindly taking `county` first and appending "District" produced
+        // incorrect labels like "Tiruchendur District". `state_district` (or
+        // plain `district`) is the reliable field for the actual district, so
+        // it takes priority. `county` is only used as a last-resort fallback,
+        // and shown as-is rather than being labeled "District".
+        let district = addr.state_district || addr.district;
         if (district) {
             let distClean = district.replace(/ District/i, '');
             parts.push(`${distClean} District`);
+        } else if (addr.county) {
+            parts.push(addr.county);
         }
 
         // 4. State
