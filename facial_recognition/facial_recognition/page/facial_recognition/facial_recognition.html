@@ -1,0 +1,95 @@
+<div class="facial-recognition-container" style="max-width: 100%; height: 100vh; padding: 10px 15px; display: flex; justify-content: center; align-items: center; background: linear-gradient(135deg, #eef6ff, #f5f8ff, #ecfff8); font-family: sans-serif; box-sizing: border-box; overflow: hidden;">
+
+    <!-- SECTION 1: SECURE LOGIN FORM -->
+    <div id="login-section" style="max-width: 400px; width: 100%; background: #ffffff; border-radius: 20px; padding: 25px; box-shadow: 0 15px 35px rgba(0,0,0,0.08); display: none; box-sizing: border-box;">
+        <h2 style="margin: 0; text-align: center; font-size: 24px; font-weight: 700; color: #1e293b;">Employee Login</h2>
+        <p style="text-align: center; color: #64748b; margin: 6px 0 20px; font-size: 13px;">Sign in to continue</p>
+
+        <div style="text-align: left; margin-bottom: 14px;">
+            <label style="font-size: 12px; font-weight: 600; color: #334155; display: block; margin-bottom: 4px;">Username</label>
+            <input id="login-username" type="text" placeholder="username@yourcompany.com" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #dbe4ef; font-size: 13px; outline: none; box-sizing: border-box; background: #f8fafc;">
+        </div>
+
+        <div style="text-align: left; margin-bottom: 18px;">
+            <label style="font-size: 12px; font-weight: 600; color: #334155; display: block; margin-bottom: 4px;">Password</label>
+            <input id="login-password" type="password" placeholder="••••••••" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #dbe4ef; font-size: 13px; outline: none; box-sizing: border-box; background: #f8fafc;">
+        </div>
+
+        <button id="btn-login" style="width: 100%; padding: 12px; border: none; border-radius: 10px; background: linear-gradient(90deg, #4f46e5, #06b6d4); color: #ffffff; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);">
+            Login
+        </button>
+    </div>
+
+    <!-- SECTION 2: EMPLOYEE TERMINAL DASHBOARD -->
+    <div id="dashboard-section" style="display: block; width: 100%; max-width: 480px; box-sizing: border-box;">
+        <div style="background: rgba(255, 255, 255, 0.95); border-radius: 24px; padding: 22px 28px; box-shadow: 0 15px 40px rgba(0,0,0,0.08); position: relative; box-sizing: border-box;">
+            
+            <!-- Header Text -->
+            <div style="text-align: center;">
+                <div style="font-size: 13px; font-weight: 600; color: #0ea5e9; margin-bottom: 2px;">👋 Welcome Back</div>
+                <h1 style="margin: 0; font-size: 24px; font-weight: 800; background: linear-gradient(90deg, #4f46e5, #06b6d4); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Biometric Portal</h1>
+                <div style="color: #64748b; font-size: 11px; margin-top: 2px; margin-bottom: 14px;">Smart Attendance • Secure • Seamless</div>
+
+                <!-- Profile Avatar Ring -->
+                <div style="position: relative; display: inline-block;">
+                    <div style="position: absolute; left: -5px; top: -5px; width: 110px; height: 110px; border-radius: 50%; background: linear-gradient(45deg, #4f46e5, #06b6d4); filter: blur(12px); opacity: 0.25;"></div>
+                    <img id="emp-image" src="/assets/frappe/images/default-avatar.png" alt="Employee Avatar" style="width: 100px; height: 100px; border-radius: 50%; border: 4px solid #ffffff; object-fit: cover; position: relative; box-shadow: 0 8px 20px rgba(0,0,0,0.12);">
+                </div>
+
+                <!-- Main Name Display -->
+                <h2 id="emp-name" style="margin-top: 10px; margin-bottom: 6px; font-size: 20px; font-weight: 700; color: #1e293b;">--</h2>
+
+                <!-- Shift Badge Display -->
+                <div style="display: inline-flex; align-items: center; padding: 4px 14px; border-radius: 50px; background: #eef2ff; color: #4f46e5; font-size: 12px; font-weight: 600; margin-bottom: 16px;">
+                    💼&nbsp;<span id="emp-shift">--</span>
+                </div>
+            </div>
+
+            <!-- 2x2 Info Grid Box -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; text-align: left;">
+                
+                <!-- Working Hours -->
+                <div style="background: #ffffff; border-radius: 14px; padding: 12px 14px; box-shadow: 0 6px 15px rgba(0,0,0,0.03); border: 1px solid #f1f5f9; display: flex; align-items: center; gap: 10px;">
+                    <div style="font-size: 22px;">🕒</div>
+                    <div style="overflow: hidden;">
+                        <div style="font-size: 11px; color: #94a3b8; font-weight: 500;">Working Hours</div>
+                        <div id="emp-timing" style="font-size: 13px; font-weight: 700; color: #1e293b; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">--</div>
+                    </div>
+                </div>
+
+                <!-- GPS Location -->
+                <div style="background: #ffffff; border-radius: 14px; padding: 12px 14px; box-shadow: 0 6px 15px rgba(0,0,0,0.03); border: 1px solid #f1f5f9; display: flex; align-items: center; gap: 10px;">
+                    <div style="font-size: 22px;">📍</div>
+                    <div style="overflow: hidden;">
+                        <div style="font-size: 11px; color: #94a3b8; font-weight: 500;">GPS Coordinates</div>
+                        <div id="emp-location" style="font-size: 13px; font-weight: 700; color: #10b981; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Fetching GPS...</div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Full Width Address Container -->
+            <div style="background: #ffffff; border-radius: 14px; padding: 12px 14px; box-shadow: 0 6px 15px rgba(0,0,0,0.03); border: 1px solid #f1f5f9; display: flex; align-items: center; gap: 10px; margin-bottom: 18px; text-align: left;">
+                <div style="font-size: 22px;">🏙️</div>
+                <div style="overflow: hidden; width: 100%;">
+                    <div style="font-size: 11px; color: #94a3b8; font-weight: 500;">Current Address</div>
+                    <div id="emp-address" style="font-size: 12px; font-weight: 600; color: #334155; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="Fetching Address...">Fetching address details...</div>
+                </div>
+            </div>
+
+            <!-- Proceed to Camera Button -->
+            <button id="btn-proceed-checkin" style="width: 100%; padding: 12px; border: none; border-radius: 12px; background: linear-gradient(90deg, #10b981, #06b6d4); color: #ffffff; font-size: 15px; font-weight: 600; cursor: pointer; box-shadow: 0 10px 25px rgba(6,182,212,0.25);">
+                <i class="fa fa-camera"></i> Check - IN
+            </button>
+
+            <!-- Logout Link -->
+            <div style="text-align: center; margin-top: 12px;">
+                <a id="btn-logout" href="#" style="color: #ef4444; font-weight: 600; font-size: 13px; text-decoration: none;">
+                    ⎋ Log Out
+                </a>
+            </div>
+
+        </div>
+    </div>
+
+</div>
