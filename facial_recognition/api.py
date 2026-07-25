@@ -1,10 +1,48 @@
 import frappe
 from frappe import _
-from frappe.utils import now_datetime, format_time, flt
+from frappe.utils import now_datetime, format_time, flt, today, get_system_timezone
 import base64
 import json
 
-from frappe.utils import now_datetime, format_time, flt, today
+try:
+    import pytz
+except ImportError:
+    pytz = None
+
+
+def get_accurate_now_datetime():
+    """
+    Returns the current datetime correctly localized to the site's configured
+    timezone (System Settings > Time Zone).
+
+    frappe.utils.now_datetime() already does a UTC -> system-timezone
+    conversion internally, but if System Settings has no timezone configured
+    (or it was left as the Frappe/ERPNext default "UTC" on a site that is
+    actually run for IST users), the resulting timestamp will be off by a
+    fixed offset (e.g. 5 hours 30 minutes for India).
+
+    This helper re-derives the time explicitly from UTC using the site's
+    configured timezone string, so the correct offset is applied even if
+    System Settings was left at its default value. If pytz isn't available
+    for some reason, it safely falls back to frappe's own now_datetime().
+    """
+    if not pytz:
+        return now_datetime()
+
+    site_timezone_name = get_system_timezone() or "UTC"
+
+    try:
+        tz = pytz.timezone(site_timezone_name)
+    except Exception:
+        # Unknown/invalid timezone string in System Settings - fall back safely
+        tz = pytz.UTC
+
+    utc_now = frappe.utils.datetime.datetime.utcnow().replace(tzinfo=pytz.UTC)
+    localized_now = utc_now.astimezone(tz)
+
+    # Strip tzinfo before returning so it stores/compares cleanly against
+    # Frappe's naive datetime fields, same as now_datetime() does.
+    return localized_now.replace(tzinfo=None)
 
 
 @frappe.whitelist(allow_guest=True)
@@ -82,11 +120,21 @@ def get_employee_dashboard_details():
             response_payload["shift_timing"] = f"{start_formatted} - {end_formatted}"
 
     # 3. Determine Next Action strictly from TODAY'S Employee Checkin history
+    #
+    # IMPORTANT: today() returns the site's calendar date as a plain date
+    # string. Comparing that against the "time" datetime field only gives
+    # the correct "today" window if the site timezone is configured
+    # correctly - otherwise checkins near midnight can be bucketed into the
+    # wrong day. Building an explicit start-of-day boundary from
+    # get_accurate_now_datetime() keeps this aligned with how we now save
+    # checkin times below.
+    day_start = get_accurate_now_datetime().replace(hour=0, minute=0, second=0, microsecond=0)
+
     todays_last_checkin = frappe.get_all(
         "Employee Checkin",
         filters={
             "employee": employee_profile.name,
-            "time": [">=", today()]
+            "time": [">=", day_start]
         },
         fields=["log_type"],
         order_by="time desc",
@@ -174,12 +222,26 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
         ]
     }
 
+    # --- CAPTURE ONE CANONICAL TIMESTAMP ---
+    #
+    # Previously this was called twice (once here, once again when building
+    # the response message below), which meant the saved Employee Checkin
+    # "time" and the time shown to the user could drift apart by however
+    # long face-match/DB insert took. It also relied on now_datetime()'s
+    # implicit UTC -> System Settings timezone conversion, which silently
+    # produces a wrong wall-clock time if that setting is blank or wrong.
+    #
+    # Fix: compute the timestamp ONCE, using the explicit timezone-safe
+    # helper, and reuse that single value both for the saved record and
+    # for the confirmation message.
+    checkin_time = get_accurate_now_datetime()
+
     # --- SUBMIT EMPLOYEE CHECK-IN ---
     checkin_doc = frappe.get_doc({
         "doctype": "Employee Checkin",
         "employee": employee.name,
         "log_type": log_type,                   # Natively tracks "IN" or "OUT"
-        "time": now_datetime(),
+        "time": checkin_time,
         "device_id": "Webcam Facial Terminal",
         "latitude": lat,
         "longitude": lng,
@@ -190,8 +252,10 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
     frappe.db.commit()
 
     # --- RESPONSE PREPARATION ---
-    current_time = now_datetime()
-    railway_time = format_time(current_time, "HH:mm")
+    # Reuse the exact same timestamp that was saved to the Employee Checkin,
+    # instead of calling now_datetime() again - guarantees the message the
+    # user sees always matches what was actually recorded.
+    railway_time = format_time(checkin_time, "HH:mm")
 
     # Dynamic status presentation ("Checked IN" or "Checked OUT")
     action_text = _("Checked IN") if log_type == "IN" else _("Checked OUT")
