@@ -205,10 +205,95 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                 });
 
         }, function(error) {
+            // Reset state on any failure
             currentCoordinates = { latitude: null, longitude: null, accuracy: null };
-            $('#emp-location').html('<span class="text-danger">Location Access Denied</span>');
-            currentAddressText = 'Location Access Denied';
-            $('#emp-address').text(currentAddressText);
+
+            // error.code: 1 = PERMISSION_DENIED, 2 = POSITION_UNAVAILABLE, 3 = TIMEOUT
+            //
+            // Browsers report POSITION_UNAVAILABLE (code 2) when the device's
+            // Location/GPS service itself is switched off at the OS level
+            // (as opposed to the site being denied permission, which is code 1).
+            // Some Android/Chrome combinations also surface this as a
+            // PERMISSION_DENIED with a "location unavailable" style message,
+            // so we pattern-match on the message text as a fallback signal too.
+            const rawMessage = (error && error.message) ? error.message.toLowerCase() : "";
+            const looksLikeServiceOff = rawMessage.indexOf('location provider') !== -1 ||
+                                        rawMessage.indexOf('location service') !== -1 ||
+                                        rawMessage.indexOf('unavailable') !== -1;
+
+            if (error.code === 2 || (error.code === 1 && looksLikeServiceOff)) {
+                // Device-level Location/GPS service is turned off
+                $('#emp-location').html('<span class="text-danger">Location Services Off</span>');
+                currentAddressText = 'Location Services (GPS) is turned off on this device';
+                $('#emp-address').text(currentAddressText);
+
+                frappe.msgprint({
+                    title: __('Turn On Location Services'),
+                    indicator: 'red',
+                    message: __('Your device\'s Location Services (GPS) appear to be switched off, so we cannot fetch your position.<br><br>Please go to your phone\'s <b>Settings &gt; Location</b> and turn Location ON (set mode to "High Accuracy" / "Precise" if available), then tap Retry below.'),
+                    primary_action: {
+                        label: __('Retry'),
+                        action: function() {
+                            cur_dialog.hide();
+                            fetchLocation();
+                        }
+                    }
+                });
+            } else if (error.code === 1) {
+                // Site-level permission denied (Location service may be on, but this site was blocked)
+                $('#emp-location').html('<span class="text-danger">Location Access Denied</span>');
+                currentAddressText = 'Location Access Denied';
+                $('#emp-address').text(currentAddressText);
+
+                frappe.msgprint({
+                    title: __('Location Permission Required'),
+                    indicator: 'red',
+                    message: __('This site does not have permission to access your location.<br><br>Please enable Location permission for this site/app in your browser or device settings, then tap Retry below.'),
+                    primary_action: {
+                        label: __('Retry'),
+                        action: function() {
+                            cur_dialog.hide();
+                            fetchLocation();
+                        }
+                    }
+                });
+            } else if (error.code === 3) {
+                // Timed out waiting for a GPS fix
+                $('#emp-location').html('<span class="text-danger">GPS Timeout</span>');
+                currentAddressText = 'GPS Timeout';
+                $('#emp-address').text(currentAddressText);
+
+                frappe.msgprint({
+                    title: __('Could Not Get GPS Fix'),
+                    indicator: 'orange',
+                    message: __('We could not get a GPS location in time. Make sure Location Services (GPS) is turned ON and you have a clear view of the sky, then tap Retry below.'),
+                    primary_action: {
+                        label: __('Retry'),
+                        action: function() {
+                            cur_dialog.hide();
+                            fetchLocation();
+                        }
+                    }
+                });
+            } else {
+                // Fallback for any unexpected error shape
+                $('#emp-location').html('<span class="text-danger">Location Access Denied</span>');
+                currentAddressText = 'Location Access Denied';
+                $('#emp-address').text(currentAddressText);
+
+                frappe.msgprint({
+                    title: __('Location Unavailable'),
+                    indicator: 'red',
+                    message: __('We could not determine your location. Please make sure Location Services (GPS) is turned on for this device and try again.'),
+                    primary_action: {
+                        label: __('Retry'),
+                        action: function() {
+                            cur_dialog.hide();
+                            fetchLocation();
+                        }
+                    }
+                });
+            }
         }, {
             enableHighAccuracy: true,   // Forces GPS chip usage where available, instead of cheap WiFi/IP lookup
             timeout: 15000,
@@ -228,7 +313,18 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
         }
 
         if (!currentCoordinates.latitude || isNaN(currentCoordinates.latitude)) {
-            frappe.msgprint(__('GPS parameters required to execute biometric request. Please check permissions or wait a moment for the GPS to lock.'));
+            frappe.msgprint({
+                title: __('Location Required'),
+                indicator: 'red',
+                message: __('GPS location is required to check in.<br><br>Please make sure Location Services (GPS) is turned ON in your device settings, then tap Retry below.'),
+                primary_action: {
+                    label: __('Retry'),
+                    action: function() {
+                        cur_dialog.hide();
+                        fetchLocation();
+                    }
+                }
+            });
             return;
         }
 
