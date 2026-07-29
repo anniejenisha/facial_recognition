@@ -162,21 +162,25 @@ MAX_ACCEPTABLE_ACCURACY_METERS = 200
 # Reads the "Geo Restrictions" doctype and blocks check-in unless the
 # employee's live GPS fix falls inside an approved zone.
 #
-# ASSUMED FIELDNAMES on "Geo Restrictions" (adjust the constants below if
-# your doctype uses different fieldnames):
-#   applicable_service   Link/Select   e.g. "Attendance"
-#   applicable_to        Select        e.g. "All" / "Specific User"
-#   applicable_employee  Table MultiSelect -> child rows expose `.employee`
-#   applicable_location  Geolocation field (GeoJSON) - the drawn circle(s)/
-#                        polygon(s) that define the allowed area
+# FIELDNAMES on "Geo Restrictions" (confirmed from the doctype's field list):
+#   title           Data                document title
+#   service         Data                e.g. "Attendance"
+#   app_location    Table MultiSelect   ("Location Table") - a tag list of
+#                   named locations; has no coordinates, so it is NOT used
+#                   for the geofence math and is left untouched here.
+#   user            Select              "All Users" / etc.
+#   employee        Table MultiSelect   ("Employee Table") -> child rows
+#                   expose `.employee` (Link to Employee)
+#   location        Geolocation         the actual drawn circle(s)/
+#                   polygon(s) (GeoJSON) that define the allowed area
 # ---------------------------------------------------------------------------
 
 GEO_RESTRICTION_DOCTYPE = "Geo Restrictions"
-GEO_RESTRICTION_SERVICE_FIELD = "applicable_service"
-GEO_RESTRICTION_APPLICABLE_TO_FIELD = "applicable_to"
-GEO_RESTRICTION_EMPLOYEE_TABLE_FIELD = "applicable_employee"
-GEO_RESTRICTION_EMPLOYEE_CHILD_FIELDNAME = "employee"  # fieldname inside each child row
-GEO_RESTRICTION_LOCATION_FIELD = "applicable_location"
+GEO_RESTRICTION_SERVICE_FIELD = "service"
+GEO_RESTRICTION_APPLICABLE_TO_FIELD = "user"
+GEO_RESTRICTION_EMPLOYEE_TABLE_FIELD = "employee"
+GEO_RESTRICTION_EMPLOYEE_CHILD_FIELDNAME = "employee"  # fieldname inside each child row of the Employee Table child doctype
+GEO_RESTRICTION_LOCATION_FIELD = "location"
 
 # Value used in the "Applicable To" select to mean "every employee".
 ALL_USERS_VALUES = {"all", "all users", "all employees"}
@@ -328,33 +332,80 @@ def _get_applicable_geo_restrictions(employee_name, service=ATTENDANCE_SERVICE_N
     return matched_docs
 
 
-def enforce_geo_restriction(employee_name, lat, lng):
+def _evaluate_geo_restriction(employee_name, lat, lng):
     """
-    Raises frappe.throw() if the employee is not inside any of their
-    applicable Geo Restrictions zones. Silently passes (no-op) if the
-    employee has no matching restriction and DEFAULT_ALLOW_WHEN_NO_RESTRICTION
-    is True.
+    Non-throwing check: returns {"allowed": bool, "message": str|None,
+    "zone_names": list}. This is the single source of truth for the geofence
+    decision - both the early "as soon as we have a fix" popup and the
+    final check-in guard call into this, so the two can never disagree.
     """
     restrictions = _get_applicable_geo_restrictions(employee_name)
 
     if not restrictions:
         if DEFAULT_ALLOW_WHEN_NO_RESTRICTION:
-            return
-        frappe.throw(
-            _("No approved check-in location has been configured for you yet. "
-              "Please contact HR/Admin to set up a Geo Restrictions zone before checking in.")
-        )
+            return {"allowed": True, "message": None, "zone_names": []}
+        return {
+            "allowed": False,
+            "message": _("No approved check-in location has been configured for you yet. "
+                          "Please contact HR/Admin to set up a Geo Restrictions zone before checking in."),
+            "zone_names": []
+        }
 
     for restriction_doc in restrictions:
         location_value = restriction_doc.get(GEO_RESTRICTION_LOCATION_FIELD)
         if _point_within_geofence(lat, lng, location_value):
-            return  # inside at least one approved zone - allowed
+            return {"allowed": True, "message": None, "zone_names": []}
 
-    zone_names = ", ".join([r.name for r in restrictions])
-    frappe.throw(
-        _("You are outside the approved check-in location(s) for your profile ({0}). "
-          "Please move within an approved zone and try again.").format(zone_names)
+    zone_names = [r.name for r in restrictions]
+    return {
+        "allowed": False,
+        "message": _("You are outside the approved check-in location(s) for your profile ({0}). "
+                      "Please move within an approved zone and try again.").format(", ".join(zone_names)),
+        "zone_names": zone_names
+    }
+
+
+def enforce_geo_restriction(employee_name, lat, lng):
+    """
+    Raises frappe.throw() if the employee is not inside any of their
+    applicable Geo Restrictions zones. Silently passes (no-op) if allowed.
+    This remains the authoritative server-side guard, called from
+    process_biometric_attendance right before the check-in is written -
+    it must never be skipped, even though the client also warns earlier.
+    """
+    result = _evaluate_geo_restriction(employee_name, lat, lng)
+    if not result["allowed"]:
+        frappe.throw(result["message"])
+
+
+@frappe.whitelist()
+def check_location_restriction(latitude, longitude):
+    """
+    Lightweight, non-throwing endpoint the frontend calls as soon as it has
+    a GPS fix (i.e. right when the location/address is displayed), so the
+    employee sees the "outside approved zone" popup immediately - rather
+    than only discovering it after opening the camera and capturing a
+    photo at Check-IN time.
+
+    Returns {"allowed": bool, "message": str|None} and never throws for a
+    normal "outside zone" case, so the client can render its own popup.
+    """
+    current_user = frappe.session.user
+    if not current_user or current_user == "Guest":
+        frappe.throw(_("Unauthorized Session."), frappe.PermissionError)
+
+    employee_name = frappe.db.get_value(
+        "Employee",
+        {"user_id": current_user, "status": "Active"},
+        "name"
     )
+
+    if not employee_name:
+        # No Employee profile - let get_employee_dashboard_details' own
+        # messaging handle that; don't block on location for this case.
+        return {"allowed": True, "message": None}
+
+    return _evaluate_geo_restriction(employee_name, flt(latitude), flt(longitude))
 
 
 @frappe.whitelist()

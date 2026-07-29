@@ -20,6 +20,12 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
     let currentActionState = "IN"; // Default logic tracking status parameter
     let currentAddressText = ""; // Flat, single-line address kept for backend submission / title attr
 
+    // Tracks whether the last-fetched location falls inside the employee's
+    // approved Geo Restrictions zone. Checked as soon as we get a GPS fix
+    // (not just at Check-IN time), so the "outside zone" popup shows up
+    // right when the location/address is displayed.
+    let geoRestrictionStatus = { allowed: true, message: null, checked: false };
+
     // Accuracy threshold (in meters). Above this, we treat the fix as
     // low-quality (WiFi/IP-based rather than a real GPS/Wi-Fi-assisted fix)
     // and block check-in. This is the single source of truth for location
@@ -171,6 +177,36 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                 );
             }
 
+            // Evaluate Geo Restriction status right away, as soon as we have
+            // a fix - this is what shows the "outside approved zone" popup
+            // at location-detection time rather than waiting until the
+            // employee taps Check-IN and opens the camera.
+            geoRestrictionStatus = { allowed: true, message: null, checked: false };
+            frappe.call({
+                method: "facial_recognition.api.check_location_restriction",
+                args: {
+                    latitude: currentCoordinates.latitude,
+                    longitude: currentCoordinates.longitude
+                },
+                callback: function(res) {
+                    if (res.message) {
+                        geoRestrictionStatus = {
+                            allowed: res.message.allowed !== false,
+                            message: res.message.message || null,
+                            checked: true
+                        };
+
+                        if (!geoRestrictionStatus.allowed) {
+                            frappe.msgprint({
+                                title: __('Outside Approved Location'),
+                                indicator: 'red',
+                                message: geoRestrictionStatus.message
+                            });
+                        }
+                    }
+                }
+            });
+
             // Fetch dynamic address from live coordinates
             fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${currentCoordinates.latitude}&lon=${currentCoordinates.longitude}&accept-language=en`)
                 .then(response => response.json())
@@ -312,6 +348,19 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                 title: __('Location Accuracy Too Low'),
                 indicator: 'orange',
                 message: __(`Your current location fix is only accurate to ~${Math.round(currentCoordinates.accuracy)} meters. This usually means location services are off or the device is using WiFi/network-based location instead of a precise fix.<br><br>Please enable "High Accuracy" / "Precise Location", turn off any VPN, and try again (ideally with a clear view of the sky if using a mobile device).`)
+            });
+            return;
+        }
+
+        // Geo Restriction was already evaluated (and popped up, if it
+        // failed) as soon as the fix came in. Re-check the cached result
+        // here too, so a stale/failed zone can't sneak through to the
+        // camera step - the server still enforces this independently either way.
+        if (geoRestrictionStatus.checked && !geoRestrictionStatus.allowed) {
+            frappe.msgprint({
+                title: __('Outside Approved Location'),
+                indicator: 'red',
+                message: geoRestrictionStatus.message || __('You are outside your approved check-in location.')
             });
             return;
         }
