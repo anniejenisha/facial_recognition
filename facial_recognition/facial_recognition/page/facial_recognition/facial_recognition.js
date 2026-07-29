@@ -21,21 +21,11 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
     let currentAddressText = ""; // Flat, single-line address kept for backend submission / title attr
 
     // Accuracy threshold (in meters). Above this, we treat the fix as
-    // network/IP-based rather than real GPS, and block check-in.
+    // low-quality (WiFi/IP-based rather than a real GPS/Wi-Fi-assisted fix)
+    // and block check-in. This is the single source of truth for location
+    // quality now - it applies equally to phones and laptops, so no device
+    // type is special-cased or blocked outright.
     const MAX_ACCEPTABLE_ACCURACY_METERS = 200;
-
-    // Detect if this is a desktop/laptop browser. These almost never have a
-    // real GPS chip — Chrome/Edge silently fall back to WiFi/IP-based
-    // positioning, which can be wrong by hundreds of kilometers while still
-    // reporting a deceptively small "accuracy" value. We block check-in on
-    // these devices rather than trust that data.
-    function isLikelyDesktopDevice() {
-        const ua = navigator.userAgent || "";
-        const isMobileUA = /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(ua);
-        // Coarse pointer + no touch points is a strong desktop signal even if UA is spoofed
-        const hasTouch = (navigator.maxTouchPoints || 0) > 0;
-        return !isMobileUA && !hasTouch;
-    }
 
     // Parse Reverse Geocoding JSON into a clean, human-readable address dynamically
     function parseDynamicAddress(data) {
@@ -114,13 +104,11 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
         $loginSec.hide();
         $dashSec.show();
 
-        if (isLikelyDesktopDevice()) {
-            $('#emp-location').html('<span class="text-danger">Unavailable on desktop</span>');
-            currentAddressText = 'Please check in from your mobile phone with GPS enabled';
-            $('#emp-address').text(currentAddressText);
-        } else {
-            fetchLocation();
-        }
+        // Always attempt to fetch a live location, on any device (phone,
+        // tablet, or laptop/desktop). Location QUALITY is enforced later
+        // via the accuracy check, rather than blocking a whole device
+        // category up front.
+        fetchLocation();
 
         // Fetch dynamic backend calculation parameters
         frappe.call({
@@ -230,7 +218,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                 frappe.msgprint({
                     title: __('Turn On Location Services'),
                     indicator: 'red',
-                    message: __('Your device\'s Location Services (GPS) appear to be switched off, so we cannot fetch your position.<br><br>Please go to your phone\'s <b>Settings &gt; Location</b> and turn Location ON (set mode to "High Accuracy" / "Precise" if available), then tap Retry below.'),
+                    message: __('Your device\'s Location Services (GPS) appear to be switched off, so we cannot fetch your position.<br><br>Please turn Location ON for this browser (set mode to "High Accuracy" / "Precise" if available), then tap Retry below.'),
                     primary_action: {
                         label: __('Retry'),
                         action: function() {
@@ -248,7 +236,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                 frappe.msgprint({
                     title: __('Location Permission Required'),
                     indicator: 'red',
-                    message: __('This site does not have permission to access your location.<br><br>Please enable Location permission for this site/app in your browser or device settings, then tap Retry below.'),
+                    message: __('This site does not have permission to access your location.<br><br>Please enable Location permission for this site in your browser settings, then tap Retry below.'),
                     primary_action: {
                         label: __('Retry'),
                         action: function() {
@@ -258,15 +246,15 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                     }
                 });
             } else if (error.code === 3) {
-                // Timed out waiting for a GPS fix
+                // Timed out waiting for a location fix
                 $('#emp-location').html('<span class="text-danger">GPS Timeout</span>');
                 currentAddressText = 'GPS Timeout';
                 $('#emp-address').text(currentAddressText);
 
                 frappe.msgprint({
-                    title: __('Could Not Get GPS Fix'),
+                    title: __('Could Not Get Location Fix'),
                     indicator: 'orange',
-                    message: __('We could not get a GPS location in time. Make sure Location Services (GPS) is turned ON and you have a clear view of the sky, then tap Retry below.'),
+                    message: __('We could not get a location fix in time. Make sure Location Services is turned ON for this browser, then tap Retry below.'),
                     primary_action: {
                         label: __('Retry'),
                         action: function() {
@@ -284,7 +272,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                 frappe.msgprint({
                     title: __('Location Unavailable'),
                     indicator: 'red',
-                    message: __('We could not determine your location. Please make sure Location Services (GPS) is turned on for this device and try again.'),
+                    message: __('We could not determine your location. Please make sure Location Services is turned on for this browser and try again.'),
                     primary_action: {
                         label: __('Retry'),
                         action: function() {
@@ -303,20 +291,11 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
 
     // Proceed & Trigger Camera Interface Validation Pipeline
     $('#btn-proceed-checkin').on('click', function() {
-        if (isLikelyDesktopDevice()) {
-            frappe.msgprint({
-                title: __('Mobile Device Required'),
-                indicator: 'red',
-                message: __('Laptops and desktops do not have a real GPS chip. Browsers on these devices estimate location from WiFi/IP data, which can be wrong by hundreds of kilometers.<br><br>Please open this page on your mobile phone (with GPS and mobile data or precise location turned on) to check in.')
-            });
-            return;
-        }
-
         if (!currentCoordinates.latitude || isNaN(currentCoordinates.latitude)) {
             frappe.msgprint({
                 title: __('Location Required'),
                 indicator: 'red',
-                message: __('GPS location is required to check in.<br><br>Please make sure Location Services (GPS) is turned ON in your device settings, then tap Retry below.'),
+                message: __('Location is required to check in.<br><br>Please make sure Location Services is turned ON in your device/browser settings, then tap Retry below.'),
                 primary_action: {
                     label: __('Retry'),
                     action: function() {
@@ -332,7 +311,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
             frappe.msgprint({
                 title: __('Location Accuracy Too Low'),
                 indicator: 'orange',
-                message: __(`Your current location fix is only accurate to ~${Math.round(currentCoordinates.accuracy)} meters. This usually means GPS is off or the device is using WiFi/network-based location instead of real GPS.<br><br>Please enable "High Accuracy" / "Precise Location" in your device settings, turn off any VPN, and try again (ideally with a clear view of the sky).`)
+                message: __(`Your current location fix is only accurate to ~${Math.round(currentCoordinates.accuracy)} meters. This usually means location services are off or the device is using WiFi/network-based location instead of a precise fix.<br><br>Please enable "High Accuracy" / "Precise Location", turn off any VPN, and try again (ideally with a clear view of the sky if using a mobile device).`)
             });
             return;
         }

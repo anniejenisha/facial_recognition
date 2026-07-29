@@ -3,6 +3,7 @@ from frappe import _
 from frappe.utils import now_datetime, format_time, flt, today, get_system_timezone
 import base64
 import json
+import math
 
 try:
     import pytz
@@ -155,6 +156,207 @@ def get_employee_dashboard_details():
 MAX_ACCEPTABLE_ACCURACY_METERS = 200
 
 
+# ---------------------------------------------------------------------------
+# GEO RESTRICTIONS ENFORCEMENT
+#
+# Reads the "Geo Restrictions" doctype and blocks check-in unless the
+# employee's live GPS fix falls inside an approved zone.
+#
+# ASSUMED FIELDNAMES on "Geo Restrictions" (adjust the constants below if
+# your doctype uses different fieldnames):
+#   applicable_service   Link/Select   e.g. "Attendance"
+#   applicable_to        Select        e.g. "All" / "Specific User"
+#   applicable_employee  Table MultiSelect -> child rows expose `.employee`
+#   applicable_location  Geolocation field (GeoJSON) - the drawn circle(s)/
+#                        polygon(s) that define the allowed area
+# ---------------------------------------------------------------------------
+
+GEO_RESTRICTION_DOCTYPE = "Geo Restrictions"
+GEO_RESTRICTION_SERVICE_FIELD = "applicable_service"
+GEO_RESTRICTION_APPLICABLE_TO_FIELD = "applicable_to"
+GEO_RESTRICTION_EMPLOYEE_TABLE_FIELD = "applicable_employee"
+GEO_RESTRICTION_EMPLOYEE_CHILD_FIELDNAME = "employee"  # fieldname inside each child row
+GEO_RESTRICTION_LOCATION_FIELD = "applicable_location"
+
+# Value used in the "Applicable To" select to mean "every employee".
+ALL_USERS_VALUES = {"all", "all users", "all employees"}
+
+# Service name to match against for attendance check-ins. Change this if
+# your "Applicable Service" options use different text.
+ATTENDANCE_SERVICE_NAME = "Attendance"
+
+# If a drawn point on the map has no explicit circle radius (i.e. it's a
+# bare marker rather than a drawn circle), treat it as a circle of this
+# radius so a single pinned marker still defines a usable zone.
+DEFAULT_POINT_RADIUS_METERS = 200
+
+# If an employee has NO matching "Geo Restrictions" document at all,
+# should check-in be allowed from anywhere? True = opt-in geofencing
+# (only restrict employees/locations that have an explicit rule). Set to
+# False for default-deny (employee must have an approved zone to check in).
+DEFAULT_ALLOW_WHEN_NO_RESTRICTION = True
+
+
+def _haversine_distance_meters(lat1, lon1, lat2, lon2):
+    """Great-circle distance between two lat/lng points, in meters."""
+    R = 6371000.0  # Earth radius in meters
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+
+    a = (math.sin(d_phi / 2) ** 2
+         + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
+def _point_in_polygon(lat, lng, ring_coords):
+    """
+    Ray-casting point-in-polygon test.
+    ring_coords: list of [lng, lat] pairs forming the polygon's outer ring
+    (GeoJSON coordinate order is [lng, lat]).
+    """
+    inside = False
+    n = len(ring_coords)
+    if n < 3:
+        return False
+
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring_coords[i][0], ring_coords[i][1]  # lng, lat
+        xj, yj = ring_coords[j][0], ring_coords[j][1]
+
+        intersects = ((yi > lat) != (yj > lat)) and (
+            lng < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi
+        )
+        if intersects:
+            inside = not inside
+        j = i
+
+    return inside
+
+
+def _point_within_geofence(lat, lng, geojson_value):
+    """
+    Checks whether (lat, lng) falls inside any circle/polygon feature stored
+    in a Geolocation field's GeoJSON value. Returns True/False. Malformed or
+    empty geolocation data returns False (no zone == does not match).
+    """
+    if not geojson_value:
+        return False
+
+    try:
+        data = json.loads(geojson_value) if isinstance(geojson_value, str) else geojson_value
+    except Exception:
+        frappe.log_error(
+            title="Geo Restrictions: failed to parse applicable_location",
+            message=frappe.get_traceback()
+        )
+        return False
+
+    if not data:
+        return False
+
+    # Normalize to a list of features whether we got a FeatureCollection
+    # or a single Feature.
+    if data.get("type") == "FeatureCollection":
+        features = data.get("features") or []
+    elif data.get("type") == "Feature":
+        features = [data]
+    else:
+        features = []
+
+    for feature in features:
+        geometry = feature.get("geometry") or {}
+        gtype = geometry.get("type")
+        props = feature.get("properties") or {}
+        coords = geometry.get("coordinates")
+
+        if not coords:
+            continue
+
+        if gtype == "Point":
+            center_lng, center_lat = coords[0], coords[1]
+            radius = props.get("radius")
+            radius_m = flt(radius) if radius not in (None, "") else DEFAULT_POINT_RADIUS_METERS
+            if _haversine_distance_meters(lat, lng, center_lat, center_lng) <= radius_m:
+                return True
+
+        elif gtype == "Polygon":
+            outer_ring = coords[0] if coords else []
+            if _point_in_polygon(lat, lng, outer_ring):
+                return True
+
+        elif gtype == "MultiPolygon":
+            for polygon in coords:
+                outer_ring = polygon[0] if polygon else []
+                if _point_in_polygon(lat, lng, outer_ring):
+                    return True
+        # LineString / MultiPoint / etc. are not areas - intentionally ignored.
+
+    return False
+
+
+def _get_applicable_geo_restrictions(employee_name, service=ATTENDANCE_SERVICE_NAME):
+    """
+    Returns the list of "Geo Restrictions" documents (as frappe Documents)
+    that apply to this employee for the given service - i.e. either scoped
+    to "All" users, or explicitly listing this employee.
+    """
+    restriction_names = frappe.get_all(
+        GEO_RESTRICTION_DOCTYPE,
+        filters={GEO_RESTRICTION_SERVICE_FIELD: service},
+        pluck="name"
+    )
+
+    matched_docs = []
+    for rname in restriction_names:
+        doc = frappe.get_doc(GEO_RESTRICTION_DOCTYPE, rname)
+
+        applicable_to = (doc.get(GEO_RESTRICTION_APPLICABLE_TO_FIELD) or "").strip().lower()
+        applies_to_employee = applicable_to in ALL_USERS_VALUES
+
+        if not applies_to_employee:
+            for row in (doc.get(GEO_RESTRICTION_EMPLOYEE_TABLE_FIELD) or []):
+                if row.get(GEO_RESTRICTION_EMPLOYEE_CHILD_FIELDNAME) == employee_name:
+                    applies_to_employee = True
+                    break
+
+        if applies_to_employee:
+            matched_docs.append(doc)
+
+    return matched_docs
+
+
+def enforce_geo_restriction(employee_name, lat, lng):
+    """
+    Raises frappe.throw() if the employee is not inside any of their
+    applicable Geo Restrictions zones. Silently passes (no-op) if the
+    employee has no matching restriction and DEFAULT_ALLOW_WHEN_NO_RESTRICTION
+    is True.
+    """
+    restrictions = _get_applicable_geo_restrictions(employee_name)
+
+    if not restrictions:
+        if DEFAULT_ALLOW_WHEN_NO_RESTRICTION:
+            return
+        frappe.throw(
+            _("No approved check-in location has been configured for you yet. "
+              "Please contact HR/Admin to set up a Geo Restrictions zone before checking in.")
+        )
+
+    for restriction_doc in restrictions:
+        location_value = restriction_doc.get(GEO_RESTRICTION_LOCATION_FIELD)
+        if _point_within_geofence(lat, lng, location_value):
+            return  # inside at least one approved zone - allowed
+
+    zone_names = ", ".join([r.name for r in restrictions])
+    frappe.throw(
+        _("You are outside the approved check-in location(s) for your profile ({0}). "
+          "Please move within an approved zone and try again.").format(zone_names)
+    )
+
+
 @frappe.whitelist()
 def process_biometric_attendance(image_base64, latitude, longitude, log_type, accuracy=None):
     """Decodes live frame image, verifies identity, maps coordinates, and creates an Employee Checkin record."""
@@ -183,6 +385,14 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
                 _("Location accuracy too low (~{0}m). Please enable High Accuracy / Precise Location and try again.").format(int(accuracy_val))
             )
 
+    lat = flt(latitude)
+    lng = flt(longitude)
+
+    # --- GEO RESTRICTIONS GUARD ---
+    # Blocks check-in unless the employee's live GPS fix falls inside an
+    # approved zone configured via the "Geo Restrictions" doctype.
+    enforce_geo_restriction(employee.name, lat, lng)
+
     # --- BIOMETRIC VALIDATION LOGIC ---
     if "," in image_base64:
         image_data = image_base64.split(",")[1]
@@ -203,9 +413,6 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
         frappe.throw(_("Biometric verification failed. The face does not match the employee profile photo."))
 
     # --- GEOLOCATION DATA STRUCTURING ---
-    lat = flt(latitude)
-    lng = flt(longitude)
-
     geolocation_data = {
         "type": "FeatureCollection",
         "features": [
