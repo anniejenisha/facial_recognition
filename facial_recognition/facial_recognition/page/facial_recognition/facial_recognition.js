@@ -483,6 +483,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
     }
 
     // System Logout Handler
+    
     $('#btn-logout').on('click', function(e) {
         e.preventDefault();
         frappe.app.logout();
