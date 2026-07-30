@@ -18,16 +18,70 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
     let currentActionState = "IN";
     let currentAddressText = "";
     let geoRestrictionStatus = { allowed: true, message: null, checked: false };
+    let locationSource = "auto"; // "auto" (GPS) or "manual" (user-confirmed pin)
 
-    // Accuracy Thresholds (in meters)
-    const MAX_ACCEPTABLE_ACCURACY_METERS = 200;
-    const GOOD_ACCURACY_METERS = 25;
-
-    // Time window allocated to acquire hardware GPS fix before trying IP fallback
-    const LOCATION_REFINE_TIMEOUT_MS = 12000;
+    const MAX_ACCEPTABLE_ACCURACY_METERS = 100;
+    const GOOD_ACCURACY_METERS = 15;
+    const LOCATION_REFINE_TIMEOUT_MS = 15000;
+    const AUTO_RETRY_INTERVAL_MS = 5000;
 
     let watchId = null;
     let refineTimer = null;
+    let autoRetryTimer = null;
+    let locationFinalized = false;      // one-shot guard so a fix is only finalized once
+    let geofenceRequestToken = 0;       // ignore stale geofence responses from an older fix
+
+    function setCheckinButtonEnabled(enabled) {
+        const $btn = $('#btn-proceed-checkin');
+        $btn.prop('disabled', !enabled);
+        $btn.css({
+            'opacity': enabled ? '1' : '0.45',
+            'cursor': enabled ? 'pointer' : 'not-allowed',
+            'filter': enabled ? 'none' : 'grayscale(40%)',
+            'pointer-events': enabled ? 'auto' : 'none'
+        });
+    }
+
+    function hideCheckinButton() {
+        $('#btn-proceed-checkin').hide();
+    }
+
+    function showCheckinButton() {
+        $('#btn-proceed-checkin').show();
+    }
+
+    function clearAutoRetry() {
+        if (autoRetryTimer) {
+            clearTimeout(autoRetryTimer);
+            autoRetryTimer = null;
+        }
+    }
+
+    function scheduleAutoRetry() {
+        clearAutoRetry();
+        autoRetryTimer = setTimeout(function() {
+            fetchLocation(true /* isAutoRetry */);
+        }, AUTO_RETRY_INTERVAL_MS);
+    }
+
+    // Chrome/Edge/Firefox support the Permissions API for geolocation.
+    // If the user flips the browser-level permission back to "allow"
+    // (after having denied it), this reloads the page automatically
+    // instead of leaving them stuck on the old error state.
+    let _permissionWatcherAttached = false;
+    function watchGeolocationPermissionForAutoRecover() {
+        if (_permissionWatcherAttached) return;
+        if (!navigator.permissions || !navigator.permissions.query) return;
+
+        navigator.permissions.query({ name: 'geolocation' }).then(function(status) {
+            _permissionWatcherAttached = true;
+            status.onchange = function() {
+                if (status.state === 'granted') {
+                    location.reload();
+                }
+            };
+        }).catch(function() { /* Permissions API not supported for geolocation on this browser */ });
+    }
 
     function parseDynamicAddress(data) {
         if (!data || !data.address) return ["Address unavailable"];
@@ -107,61 +161,78 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
     }
 
     // ---------------------------------------------------------------------
-    // OPTIMIZED LOCATION ACQUISITION & FALLBACK STRATEGY
+    // AUTOMATIC LOCATION (GPS / network)
     // ---------------------------------------------------------------------
 
-    function fetchLocation() {
-        stopWatching();
+    function fetchLocation(isAutoRetry) {
+        locationSource = "auto";
 
-        $('#emp-location').html('<span class="text-info"><i class="fa fa-spinner fa-spin"></i> Acquiring GPS coordinates...</span>');
-        currentAddressText = 'Resolving address details...';
-        $('#emp-address').text(currentAddressText);
-        $('#btn-proceed-checkin').prop('disabled', true);
+        if (!isAutoRetry) {
+            clearAutoRetry();
+        }
 
         if (!navigator.geolocation) {
-            fetchIPFallbackLocation(__('Native Geolocation unsupported. Switched to IP Location.'));
+            renderLocationUnavailable(__('Geolocation is not supported by this browser interface.'), false, null, isAutoRetry);
             return;
         }
 
+        stopWatching();
+        locationFinalized = false;
+
+        showCheckinButton();
+        $('#emp-location').html('Acquiring precise GPS coordinates...');
+        currentAddressText = 'Resolving address details...';
+        $('#emp-address').text(currentAddressText);
+        setCheckinButtonEnabled(false);
+
         let bestFix = null;
+        let positionUnavailableSeen = false;
 
-        const processIncomingFix = (coords) => {
-            if (!bestFix || coords.accuracy < bestFix.accuracy) {
-                bestFix = {
-                    latitude: coords.latitude,
-                    longitude: coords.longitude,
-                    accuracy: coords.accuracy
-                };
+        function tryFinalize(fix) {
+            if (locationFinalized) return; // already finalized this round — ignore any late/duplicate callback
+            locationFinalized = true;
+            clearAutoRetry();
+            finalizeLocation(fix);
+        }
 
-                currentCoordinates = { ...bestFix };
-                renderLiveAccuracy(bestFix, bestFix.accuracy > GOOD_ACCURACY_METERS);
+        watchId = navigator.geolocation.watchPosition(
+            function(position) {
+                if (locationFinalized) return;
 
-                const isAcceptable = bestFix.accuracy <= MAX_ACCEPTABLE_ACCURACY_METERS;
-                $('#btn-proceed-checkin').prop('disabled', !isAcceptable);
+                const coords = position.coords;
 
-                checkGeofenceAndResolveAddress(bestFix.latitude, bestFix.longitude);
+                if (!bestFix || coords.accuracy < bestFix.accuracy) {
+                    bestFix = {
+                        latitude: coords.latitude,
+                        longitude: coords.longitude,
+                        accuracy: coords.accuracy
+                    };
+                    renderLiveAccuracy(bestFix, bestFix.accuracy > GOOD_ACCURACY_METERS);
+                }
 
                 if (bestFix.accuracy <= GOOD_ACCURACY_METERS) {
-                    finalizeLocation(bestFix);
+                    tryFinalize(bestFix);
                 }
-            }
-        };
+            },
+            function(error) {
+                if (locationFinalized) return;
 
-        // 1. Instant snapshot attempt (fast initial load)
-        navigator.geolocation.getCurrentPosition(
-            (pos) => processIncomingFix(pos.coords),
-            (err) => { /* Fail over to watchPosition */ },
-            { enableHighAccuracy: true, timeout: 4000, maximumAge: 5000 }
-        );
-
-        // 2. Active stream listener to refine accuracy
-        watchId = navigator.geolocation.watchPosition(
-            (pos) => processIncomingFix(pos.coords),
-            (error) => {
-                if (!bestFix) {
+                if (error.code === error.PERMISSION_DENIED) {
                     stopWatching();
-                    fetchIPFallbackLocation(getGeolocationErrorMessage(error));
+                    locationFinalized = true;
+                    currentCoordinates = { latitude: null, longitude: null, accuracy: null };
+                    renderLocationUnavailable(getGeolocationErrorMessage(error), true, null, isAutoRetry);
+                    watchGeolocationPermissionForAutoRecover();
+                    return;
                 }
+
+                if (error.code === error.POSITION_UNAVAILABLE) {
+                    // Most commonly means device Location Services are switched off
+                    // at the OS level. Keep waiting for the refine timeout below,
+                    // but remember this so the timeout message is accurate.
+                    positionUnavailableSeen = true;
+                }
+                // Transient error: keep whatever bestFix we already have, if any.
             },
             {
                 enableHighAccuracy: true,
@@ -170,41 +241,20 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
             }
         );
 
-        // 3. Fallback timer if signal stream delays
         refineTimer = setTimeout(function() {
             stopWatching();
+            if (locationFinalized) return;
+
             if (bestFix) {
-                finalizeLocation(bestFix);
+                tryFinalize(bestFix);
             } else {
-                fetchIPFallbackLocation(__('GPS signal timed out. Switched to Network IP Location.'));
+                locationFinalized = true;
+                const message = positionUnavailableSeen
+                    ? __('Location Services appear to be turned off on this device.')
+                    : __('Could not get a GPS fix in time.');
+                renderLocationUnavailable(message, true, null, isAutoRetry);
             }
         }, LOCATION_REFINE_TIMEOUT_MS);
-    }
-
-    function fetchIPFallbackLocation(reasonMessage) {
-        fetch('https://ipapi.co/json/')
-            .then(res => res.json())
-            .then(data => {
-                if (data && data.latitude && data.longitude) {
-                    let ipFix = {
-                        latitude: parseFloat(data.latitude),
-                        longitude: parseFloat(data.longitude),
-                        accuracy: 1000
-                    };
-                    
-                    currentCoordinates = ipFix;
-                    const latLngStr = `${ipFix.latitude.toFixed(6)}, ${ipFix.longitude.toFixed(6)}`;
-                    $('#emp-location').html(`<strong>${latLngStr}</strong> <div class="text-warning style-sub-text mt-1">⚠️ Network IP Estimate</div>`);
-                    
-                    $('#btn-proceed-checkin').prop('disabled', false);
-                    checkGeofenceAndResolveAddress(ipFix.latitude, ipFix.longitude);
-                } else {
-                    renderLocationUnavailable(reasonMessage || __('Unable to resolve location coordinates.'), true);
-                }
-            })
-            .catch(err => {
-                renderLocationUnavailable(reasonMessage || __('Location services unavailable.'), true);
-            });
     }
 
     function stopWatching() {
@@ -224,7 +274,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
 
         if (fix.accuracy > MAX_ACCEPTABLE_ACCURACY_METERS) {
             html += `<div class="text-danger font-weight-bold style-sub-text mt-1">
-                        ⚠️ Low Accuracy (~${Math.round(fix.accuracy)}m radius)${stillRefining ? ' — refining signal…' : ''}
+                        ⚠️ Low Accuracy (~${Math.round(fix.accuracy)}m radius)${stillRefining ? ' — refining hardware signal…' : ''}
                      </div>`;
         } else {
             html += `<div class="text-success font-weight-bold style-sub-text mt-1">
@@ -236,58 +286,258 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
 
     function finalizeLocation(fix) {
         stopWatching();
+        clearAutoRetry();
 
         currentCoordinates.latitude = fix.latitude;
         currentCoordinates.longitude = fix.longitude;
         currentCoordinates.accuracy = fix.accuracy;
+        locationSource = "auto";
 
         renderLiveAccuracy(fix, false);
 
         const accuracyOk = fix.accuracy <= MAX_ACCEPTABLE_ACCURACY_METERS;
-        $('#btn-proceed-checkin').prop('disabled', !accuracyOk);
+        setCheckinButtonEnabled(accuracyOk);
 
         if (!accuracyOk) {
-            let platformHelp = !isLikelyMobile() 
-                ? 'Laptops rely on Wi-Fi/IP routing. Please check in using a mobile device with active GPS for precise tracking.'
-                : 'Ensure "Precise Location" is enabled in browser permissions and step near a window or outdoors.';
-
             currentAddressText = `Location accuracy insufficient (~${Math.round(fix.accuracy)}m)`;
+
             $('#emp-address').html(
                 `<span class="text-danger">
-                    Accuracy low (~${Math.round(fix.accuracy)}m).<br>
-                    <small>${platformHelp}</small>
+                    Accuracy too low (~${Math.round(fix.accuracy)}m) to trust automatically.
                  </span>
                  <div class="mt-2">
-                    <a href="#" id="btn-retry-location" class="btn btn-xs btn-default font-weight-bold">Retry Location Acquisition</a>
+                    <a href="#" id="btn-retry-location" class="btn btn-xs btn-default font-weight-bold">Retry GPS</a>
+                    <a href="#" id="btn-manual-location" class="btn btn-xs btn-primary font-weight-bold">Set Location on Map</a>
                  </div>`
             ).attr('title', currentAddressText);
 
+            hideCheckinButton();
+
             frappe.msgprint({
-                title: __('Low GPS Accuracy Detected'),
+                title: __('Location Accuracy Too Low'),
                 indicator: 'orange',
-                message: __(`Coordinates acquired with ~${Math.round(fix.accuracy)}m tolerance.<br><br>${platformHelp}`),
+                message: __(`Automatic accuracy is ~${Math.round(fix.accuracy)}m (need ${MAX_ACCEPTABLE_ACCURACY_METERS}m or better). This is common on laptops without GPS hardware. You can retry, or confirm your location manually on the map.`),
                 primary_action: {
-                    label: __('Retry'),
+                    label: __('Set Location on Map'),
                     action: function() {
                         cur_dialog.hide();
-                        fetchLocation();
+                        openManualLocationPicker(fix.latitude, fix.longitude);
                     }
                 }
             });
-
-            checkGeofenceAndResolveAddress(fix.latitude, fix.longitude);
             return;
         }
 
-        checkGeofenceAndResolveAddress(fix.latitude, fix.longitude);
+        proceedWithCoordinates();
     }
 
-    function checkGeofenceAndResolveAddress(lat, lon) {
+    function renderLocationUnavailable(customMessage, isPermissionOrTimeoutError, fallbackCenter, isAutoRetry) {
+        $('#emp-location').html('<span class="text-danger font-weight-bold">Location Unavailable</span>');
+        currentAddressText = customMessage || 'Location access failed or disabled';
+        $('#emp-address').html(
+            `<span class="text-danger">${frappe.utils.escape_html(currentAddressText)}</span>
+             <div class="mt-2">
+                <a href="#" id="btn-retry-location" class="btn btn-xs btn-default font-weight-bold">Retry</a>
+                <a href="#" id="btn-manual-location" class="btn btn-xs btn-primary font-weight-bold">Set Location on Map</a>
+             </div>`
+        );
+        setCheckinButtonEnabled(false);
+        hideCheckinButton();
+
+        if (isPermissionOrTimeoutError) {
+            // Keep quietly re-checking in the background so that as soon as
+            // the user flips Location Services back on, the app recovers
+            // on its own without them needing to manually retry.
+            scheduleAutoRetry();
+
+            if (!isAutoRetry) {
+                frappe.msgprint({
+                    title: __('Location Services Disabled or Denied'),
+                    indicator: 'red',
+                    message: __('Please turn ON Location Services (with High Accuracy) and allow location access when prompted. We will keep checking automatically every few seconds — or you can set your location manually on the map.'),
+                    primary_action: {
+                        label: __('Set Location on Map'),
+                        action: function() {
+                            cur_dialog.hide();
+                            openManualLocationPicker(fallbackCenter && fallbackCenter.lat, fallbackCenter && fallbackCenter.lng);
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    function getGeolocationErrorMessage(error) {
+        switch (error.code) {
+            case error.PERMISSION_DENIED:
+                return __('Location permission denied. Please grant permission in browser settings.');
+            case error.POSITION_UNAVAILABLE:
+                return __('Location information is unavailable from hardware/network providers.');
+            case error.TIMEOUT:
+                return __('GPS location request timed out. Please try again.');
+            default:
+                return __('An unknown error occurred while acquiring location.');
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // MANUAL LOCATION PICKER (Leaflet + OpenStreetMap, no API key required)
+    //
+    // Used when automatic (GPS/network) location can't be trusted — most
+    // commonly a laptop with no GPS chip whose Wi-Fi network resolves to a
+    // stale/wrong location in Google's or Mozilla's crowdsourced database.
+    // No JS can correct that external database; letting the person confirm
+    // their real position on a map is the only reliable way to get a
+    // correct address in that situation.
+    // ---------------------------------------------------------------------
+
+    let _leafletLoading = null;
+
+    function loadLeafletAssets() {
+        if (window.L) return Promise.resolve();
+        if (_leafletLoading) return _leafletLoading;
+
+        _leafletLoading = new Promise(function(resolve, reject) {
+            const cssLink = document.createElement('link');
+            cssLink.rel = 'stylesheet';
+            cssLink.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+            document.head.appendChild(cssLink);
+
+            const script = document.createElement('script');
+            script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error('Failed to load map library'));
+            document.head.appendChild(script);
+        });
+
+        return _leafletLoading;
+    }
+
+    function openManualLocationPicker(initialLat, initialLng) {
+        loadLeafletAssets().then(function() {
+            // Fallback center: last known auto fix, else a neutral default (India center-ish).
+            const centerLat = (typeof initialLat === 'number' && !isNaN(initialLat)) ? initialLat : 20.5937;
+            const centerLng = (typeof initialLng === 'number' && !isNaN(initialLng)) ? initialLng : 78.9629;
+            const startZoom = (typeof initialLat === 'number') ? 16 : 5;
+
+            let dialog = new frappe.ui.Dialog({
+                title: __('Confirm Your Location'),
+                fields: [
+                    {
+                        fieldtype: 'HTML',
+                        fieldname: 'map_picker',
+                        options: `
+                            <div style="font-size:12px;color:#64748b;margin-bottom:8px;">
+                                ${__('Drag the pin (or tap the map) to your exact current location, then confirm.')}
+                            </div>
+                            <div id="manual-location-map" style="width:100%; height:340px; border-radius:10px;"></div>
+                            <div id="manual-location-readout" style="margin-top:8px; font-size:12px; color:#334155;"></div>
+                        `
+                    }
+                ],
+                primary_action_label: __('Confirm This Location'),
+                primary_action: function() {
+                    const m = dialog.$wrapper.data('marker');
+                    if (!m) return; // map still initializing, ignore accidental early click
+                    const pos = m.getLatLng();
+                    dialog.hide();
+                    reverseGeocodeManualPin(pos.lat, pos.lng);
+                },
+                secondary_action_label: __('Cancel')
+            });
+
+            dialog.show();
+
+            // Leaflet needs the container to be visible/sized before init.
+            setTimeout(function() {
+                const map = L.map('manual-location-map').setView([centerLat, centerLng], startZoom);
+
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19,
+                    attribution: '© OpenStreetMap contributors'
+                }).addTo(map);
+
+                const marker = L.marker([centerLat, centerLng], { draggable: true }).addTo(map);
+                dialog.$wrapper.data('marker', marker);
+
+                function updateReadout(latlng) {
+                    $('#manual-location-readout').text(
+                        `${__('Selected')}: ${latlng.lat.toFixed(6)}, ${latlng.lng.toFixed(6)}`
+                    );
+                }
+                updateReadout(marker.getLatLng());
+
+                marker.on('drag', function(e) {
+                    updateReadout(e.target.getLatLng());
+                });
+
+                map.on('click', function(e) {
+                    marker.setLatLng(e.latlng);
+                    updateReadout(e.latlng);
+                });
+            }, 150);
+        }).catch(function(err) {
+            frappe.msgprint({
+                title: __('Map Unavailable'),
+                indicator: 'red',
+                message: __('Could not load the map picker. Please check your internet connection and try again.')
+            });
+        });
+    }
+
+    function reverseGeocodeManualPin(lat, lng) {
+        clearAutoRetry();
+        locationFinalized = true;
+
+        $('#emp-location').html(`<strong>${lat.toFixed(6)}, ${lng.toFixed(6)}</strong>
+            <div class="text-success font-weight-bold style-sub-text mt-1">✓ Manually Confirmed</div>`);
+        $('#emp-address').text(__('Resolving address details...'));
+
+        currentCoordinates.latitude = lat;
+        currentCoordinates.longitude = lng;
+        currentCoordinates.accuracy = 1; // treated as trusted since the user explicitly confirmed it
+        locationSource = "manual";
+
+        fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=en`)
+            .then(response => response.json())
+            .then(data => {
+                let addressLines = parseDynamicAddress(data);
+                currentAddressText = addressLines.join(", ") + " (Manually Confirmed)";
+                let addressHtml = addressLines
+                    .map(line => `<div class="address-line">${frappe.utils.escape_html(line)}</div>`)
+                    .join("") + `<div class="text-muted" style="font-size:11px;">(${__('Manually Confirmed')})</div>`;
+                $('#emp-address').html(addressHtml).attr('title', currentAddressText);
+            })
+            .catch(() => {
+                currentAddressText = `${lat.toFixed(6)}, ${lng.toFixed(6)} (Manually Confirmed, address service offline)`;
+                $('#emp-address').text(currentAddressText);
+            })
+            .finally(() => {
+                proceedWithCoordinates();
+            });
+    }
+
+    // ---------------------------------------------------------------------
+    // Shared step: geofence check, run for both auto and manual coordinates
+    // ---------------------------------------------------------------------
+
+    function proceedWithCoordinates() {
+        showCheckinButton();
+        setCheckinButtonEnabled(false); // stay disabled until the geofence check below resolves
+
         geoRestrictionStatus = { allowed: true, message: null, checked: false };
+
+        const myToken = ++geofenceRequestToken;
+
         frappe.call({
             method: "facial_recognition.api.check_location_restriction",
-            args: { latitude: lat, longitude: lon },
+            args: {
+                latitude: currentCoordinates.latitude,
+                longitude: currentCoordinates.longitude
+            },
             callback: function(res) {
+                if (myToken !== geofenceRequestToken) return; // a newer fix superseded this check — ignore
+
                 if (res.message) {
                     geoRestrictionStatus = {
                         allowed: res.message.allowed !== false,
@@ -296,68 +546,43 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                     };
 
                     if (!geoRestrictionStatus.allowed) {
+                        setCheckinButtonEnabled(false);
+                        hideCheckinButton();
                         frappe.msgprint({
-                            title: __('Outside Approved Geofence'),
+                            title: __('Outside Approved Location'),
                             indicator: 'red',
                             message: geoRestrictionStatus.message
                         });
+                    } else {
+                        showCheckinButton();
+                        setCheckinButtonEnabled(true);
                     }
+                } else {
+                    // No restriction info returned — don't block the person unnecessarily.
+                    showCheckinButton();
+                    setCheckinButtonEnabled(true);
                 }
             }
         });
 
-        fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&accept-language=en`)
-            .then(response => response.json())
-            .then(data => {
-                let addressLines = parseDynamicAddress(data);
-                currentAddressText = addressLines.join(", ");
-                let addressHtml = addressLines
-                    .map(line => `<div class="address-line">${frappe.utils.escape_html(line)}</div>`)
-                    .join("");
-                $('#emp-address').html(addressHtml).attr('title', currentAddressText);
-            })
-            .catch(err => {
-                const latLngStr = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
-                currentAddressText = `${latLngStr} (Address service offline)`;
-                $('#emp-address').text(currentAddressText);
-            });
-    }
-
-    function renderLocationUnavailable(customMessage, isPermissionOrTimeoutError) {
-        $('#emp-location').html('<span class="text-danger font-weight-bold">Location Unavailable</span>');
-        currentAddressText = customMessage || 'Location access failed or disabled';
-        $('#emp-address').html(
-            `<span class="text-danger">${frappe.utils.escape_html(currentAddressText)}</span>
-             <div class="mt-2"><a href="#" id="btn-retry-location" class="btn btn-xs btn-default font-weight-bold">Retry Location</a></div>`
-        );
-        $('#btn-proceed-checkin').prop('disabled', true);
-
-        if (isPermissionOrTimeoutError) {
-            frappe.msgprint({
-                title: __('Location Access Issue'),
-                indicator: 'red',
-                message: __('Please grant browser location permissions and enable Location Services.'),
-                primary_action: {
-                    label: __('Retry'),
-                    action: function() {
-                        cur_dialog.hide();
-                        fetchLocation();
-                    }
-                }
-            });
-        }
-    }
-
-    function getGeolocationErrorMessage(error) {
-        switch (error.code) {
-            case error.PERMISSION_DENIED:
-                return __('Location permission denied in browser settings.');
-            case error.POSITION_UNAVAILABLE:
-                return __('GPS position unavailable from device.');
-            case error.TIMEOUT:
-                return __('GPS request timed out.');
-            default:
-                return __('Error acquiring GPS location.');
+        // For auto-located fixes, also refresh the displayed address via reverse geocoding.
+        // (Manual pins already resolve their address in reverseGeocodeManualPin.)
+        if (locationSource === "auto") {
+            fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${currentCoordinates.latitude}&lon=${currentCoordinates.longitude}&accept-language=en`)
+                .then(response => response.json())
+                .then(data => {
+                    let addressLines = parseDynamicAddress(data);
+                    currentAddressText = addressLines.join(", ");
+                    let addressHtml = addressLines
+                        .map(line => `<div class="address-line">${frappe.utils.escape_html(line)}</div>`)
+                        .join("");
+                    $('#emp-address').html(addressHtml).attr('title', currentAddressText);
+                })
+                .catch(() => {
+                    const latLngStr = `${currentCoordinates.latitude.toFixed(6)}, ${currentCoordinates.longitude.toFixed(6)}`;
+                    currentAddressText = `${latLngStr} (Geocoding server unreachable)`;
+                    $('#emp-address').text(currentAddressText);
+                });
         }
     }
 
@@ -370,16 +595,25 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
             frappe.msgprint({
                 title: __('Location Required'),
                 indicator: 'red',
-                message: __('Location coordinates are required to complete check-in.')
+                message: __('Location is required to check in. Please allow Location Services or set your location manually.')
+            });
+            return;
+        }
+
+        if (locationSource === "auto" && currentCoordinates.accuracy && currentCoordinates.accuracy > MAX_ACCEPTABLE_ACCURACY_METERS) {
+            frappe.msgprint({
+                title: __('Location Accuracy Too Low'),
+                indicator: 'orange',
+                message: __(`GPS accuracy is ~${Math.round(currentCoordinates.accuracy)}m. Required precision is ${MAX_ACCEPTABLE_ACCURACY_METERS}m or better, or confirm your location manually.`)
             });
             return;
         }
 
         if (geoRestrictionStatus.checked && !geoRestrictionStatus.allowed) {
             frappe.msgprint({
-                title: __('Outside Approved Geofence'),
+                title: __('Outside Approved Location'),
                 indicator: 'red',
-                message: geoRestrictionStatus.message || __('You are outside your authorized check-in location.')
+                message: geoRestrictionStatus.message || __('You are outside your approved check-in location.')
             });
             return;
         }
@@ -390,6 +624,11 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
     $(document).on('click', '#btn-retry-location', function(e) {
         e.preventDefault();
         fetchLocation();
+    });
+
+    $(document).on('click', '#btn-manual-location', function(e) {
+        e.preventDefault();
+        openManualLocationPicker(currentCoordinates.latitude, currentCoordinates.longitude);
     });
 
     function openBiometricCameraSubsystem() {
@@ -453,7 +692,8 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                                 longitude: currentCoordinates.longitude,
                                 accuracy: currentCoordinates.accuracy,
                                 address: currentAddressText.trim(),
-                                log_type: currentActionState
+                                log_type: currentActionState,
+                                location_source: locationSource
                             },
                             freeze: true,
                             freeze_message: __("Verifying facial biometric profile..."),
@@ -474,7 +714,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
                     frappe.msgprint(__('Unable to access camera hardware: ') + (err.message || err.name));
                 });
         } else {
-            frappe.msgprint(__('Browser environment does not support media stream interface. Ensure site is running over HTTPS.'));
+            frappe.msgprint(__('Browser environment does not support media stream interface. Ensure site is running on HTTPS.'));
         }
     }
 
