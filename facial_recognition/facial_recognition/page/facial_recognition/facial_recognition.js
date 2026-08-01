@@ -30,6 +30,7 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
     let autoRetryTimer = null;
     let locationFinalized = false;      // one-shot guard so a fix is only finalized once
     let geofenceRequestToken = 0;       // ignore stale geofence responses from an older fix
+    let addressRequestToken = 0;        // ignore stale reverse-geocode responses from an older fix
 
     function setCheckinButtonEnabled(enabled) {
         const $btn = $('#btn-proceed-checkin');
@@ -106,6 +107,19 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
         if (addr.postcode) parts.push(addr.postcode);
 
         return parts.length > 0 ? parts : (data.display_name ? [data.display_name] : ["Location details logged"]);
+    }
+
+    // ---------------------------------------------------------------------
+    // Shared reverse-geocoding helper.
+    // Used for auto (GPS/network) fixes AND manual map pins, and now also
+    // for the "low accuracy" case so the person always sees a real address
+    // instead of a generic error message — on both mobile and desktop.
+    // ---------------------------------------------------------------------
+    function resolveAddressLines(lat, lng) {
+        return fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=en`)
+            .then(response => response.json())
+            .then(data => parseDynamicAddress(data))
+            .catch(() => [`${lat.toFixed(6)}, ${lng.toFixed(6)} (Geocoding server unreachable)`]);
     }
 
     if (frappe.session.user && frappe.session.user !== "Guest") {
@@ -284,6 +298,26 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
         $('#emp-location').html(html);
     }
 
+    // ---------------------------------------------------------------------
+    // Renders the resolved address into #emp-address.
+    // extraHtml (optional) is appended below the address lines — used to
+    // show the low-accuracy warning + retry/manual buttons without hiding
+    // the actual address, on both mobile and desktop.
+    // ---------------------------------------------------------------------
+    function renderAddressBlock(addressLines, suffixForTitle, extraHtml) {
+        currentAddressText = addressLines.join(", ") + (suffixForTitle ? ` ${suffixForTitle}` : "");
+
+        let html = addressLines
+            .map(line => `<div class="address-line">${frappe.utils.escape_html(line)}</div>`)
+            .join("");
+
+        if (extraHtml) {
+            html += extraHtml;
+        }
+
+        $('#emp-address').html(html).attr('title', currentAddressText);
+    }
+
     function finalizeLocation(fix) {
         stopWatching();
         clearAutoRetry();
@@ -299,31 +333,31 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
         setCheckinButtonEnabled(accuracyOk);
 
         if (!accuracyOk) {
-            currentAddressText = `Location accuracy insufficient (~${Math.round(fix.accuracy)}m)`;
-
-            $('#emp-address').html(
-                `<span class="text-danger">
-                    Accuracy too low (~${Math.round(fix.accuracy)}m) to trust automatically.
-                 </span>
-                 <div class="mt-2">
-                    <a href="#" id="btn-retry-location" class="btn btn-xs btn-default font-weight-bold">Retry GPS</a>
-                    <a href="#" id="btn-manual-location" class="btn btn-xs btn-primary font-weight-bold">Set Location on Map</a>
-                 </div>`
-            ).attr('title', currentAddressText);
-
+            // Still resolve and SHOW the real address — just alongside a
+            // low-accuracy warning, instead of replacing it with an error.
+            $('#emp-address').html(`<span class="text-muted">${__('Resolving address details...')}</span>`);
             hideCheckinButton();
+
+            const myToken = ++addressRequestToken;
+
+            resolveAddressLines(fix.latitude, fix.longitude).then(function(addressLines) {
+                if (myToken !== addressRequestToken) return; // a newer fix superseded this lookup
+
+                const warningHtml = `
+                    <div class="text-danger font-weight-bold" style="font-size:12px; margin-top:6px;">
+                        ⚠️ ${__('Accuracy too low')} (~${Math.round(fix.accuracy)}m) — ${__('please retry GPS or confirm on map before checking in')}
+                    </div>
+                    <div class="mt-2">
+                    </div>`;
+
+                renderAddressBlock(addressLines, `(Low accuracy ~${Math.round(fix.accuracy)}m)`, warningHtml);
+            });
 
             frappe.msgprint({
                 title: __('Location Accuracy Too Low'),
                 indicator: 'orange',
                 message: __(`Automatic accuracy is ~${Math.round(fix.accuracy)}m (need ${MAX_ACCEPTABLE_ACCURACY_METERS}m or better). This is common on laptops without GPS hardware. You can retry, or confirm your location manually on the map.`),
-                primary_action: {
-                    label: __('Set Location on Map'),
-                    action: function() {
-                        cur_dialog.hide();
-                        openManualLocationPicker(fix.latitude, fix.longitude);
-                    }
-                }
+                
             });
             return;
         }
@@ -498,21 +532,18 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
         currentCoordinates.accuracy = 1; // treated as trusted since the user explicitly confirmed it
         locationSource = "manual";
 
-        fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=en`)
-            .then(response => response.json())
-            .then(data => {
-                let addressLines = parseDynamicAddress(data);
-                currentAddressText = addressLines.join(", ") + " (Manually Confirmed)";
-                let addressHtml = addressLines
-                    .map(line => `<div class="address-line">${frappe.utils.escape_html(line)}</div>`)
-                    .join("") + `<div class="text-muted" style="font-size:11px;">(${__('Manually Confirmed')})</div>`;
-                $('#emp-address').html(addressHtml).attr('title', currentAddressText);
+        const myToken = ++addressRequestToken;
+
+        resolveAddressLines(lat, lng)
+            .then(function(addressLines) {
+                if (myToken !== addressRequestToken) return;
+                renderAddressBlock(
+                    addressLines,
+                    "(Manually Confirmed)",
+                    `<div class="text-muted" style="font-size:11px;">(${__('Manually Confirmed')})</div>`
+                );
             })
-            .catch(() => {
-                currentAddressText = `${lat.toFixed(6)}, ${lng.toFixed(6)} (Manually Confirmed, address service offline)`;
-                $('#emp-address').text(currentAddressText);
-            })
-            .finally(() => {
+            .finally(function() {
                 proceedWithCoordinates();
             });
     }
@@ -568,20 +599,11 @@ frappe.pages['facial-recognition'].on_page_load = function(wrapper) {
         // For auto-located fixes, also refresh the displayed address via reverse geocoding.
         // (Manual pins already resolve their address in reverseGeocodeManualPin.)
         if (locationSource === "auto") {
-            fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${currentCoordinates.latitude}&lon=${currentCoordinates.longitude}&accept-language=en`)
-                .then(response => response.json())
-                .then(data => {
-                    let addressLines = parseDynamicAddress(data);
-                    currentAddressText = addressLines.join(", ");
-                    let addressHtml = addressLines
-                        .map(line => `<div class="address-line">${frappe.utils.escape_html(line)}</div>`)
-                        .join("");
-                    $('#emp-address').html(addressHtml).attr('title', currentAddressText);
-                })
-                .catch(() => {
-                    const latLngStr = `${currentCoordinates.latitude.toFixed(6)}, ${currentCoordinates.longitude.toFixed(6)}`;
-                    currentAddressText = `${latLngStr} (Geocoding server unreachable)`;
-                    $('#emp-address').text(currentAddressText);
+            const myAddrToken = ++addressRequestToken;
+            resolveAddressLines(currentCoordinates.latitude, currentCoordinates.longitude)
+                .then(function(addressLines) {
+                    if (myAddrToken !== addressRequestToken) return;
+                    renderAddressBlock(addressLines);
                 });
         }
     }
