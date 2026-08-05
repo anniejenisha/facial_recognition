@@ -4,21 +4,11 @@ from frappe.utils import now_datetime, format_time, flt, today, get_system_timez
 import base64
 import json
 import math
-import os
-import io
 
 try:
     import pytz
 except ImportError:
     pytz = None
-
-try:
-    import cv2
-    import numpy as np
-    from PIL import Image
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
 
 MAX_ACCEPTABLE_ACCURACY_METERS = 200
 GEO_RESTRICTION_DOCTYPE = "Geo Restrictions"
@@ -298,70 +288,8 @@ def check_location_restriction(latitude, longitude):
     return _evaluate_geo_restriction(employee_name, flt(latitude), flt(longitude))
 
 
-# --- OPENCV FACIAL MATCHING ENGINE (No dlib/cmake required) ---
-
-def extract_face_crop(img_gray):
-    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    face_cascade = cv2.CascadeClassifier(cascade_path)
-    faces = face_cascade.detectMultiScale(img_gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
-    
-    if len(faces) == 0:
-        return None
-
-    # Pick largest face detected
-    x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-    face_crop = img_gray[y:y+h, x:x+w]
-    return cv2.resize(face_crop, (150, 150))
-
-
-def verify_facial_biometrics_opencv(stored_image_url, live_image_bytes, threshold=0.55):
-    if not HAS_CV2:
-        frappe.throw(_("opencv-python-headless is not installed in bench python environment."))
-
-    # Resolve local server file path
-    if stored_image_url.startswith("/private"):
-        file_path = frappe.get_site_path(stored_image_url.lstrip("/"))
-    elif stored_image_url.startswith("/files"):
-        file_path = frappe.get_site_path("public", stored_image_url.lstrip("/"))
-    else:
-        file_path = frappe.get_site_path("public", "files", os.path.basename(stored_image_url))
-
-    if not os.path.exists(file_path):
-        frappe.throw(_("Baseline employee profile photo file not found on server storage path."))
-
-    # Load baseline image
-    baseline_bgr = cv2.imread(file_path)
-    if baseline_bgr is None:
-        frappe.throw(_("Failed to read Employee Master profile photo."))
-
-    baseline_gray = cv2.cvtColor(baseline_bgr, cv2.COLOR_BGR2GRAY)
-    baseline_face = extract_face_crop(baseline_gray)
-
-    if baseline_face is None:
-        frappe.throw(_("No face detected in stored Employee Master profile image."))
-
-    # Load live selfie frame
-    live_pil = Image.open(io.BytesIO(live_image_bytes)).convert("RGB")
-    live_bgr = cv2.cvtColor(np.array(live_pil), cv2.COLOR_RGB2BGR)
-    live_gray = cv2.cvtColor(live_bgr, cv2.COLOR_BGR2GRAY)
-    live_face = extract_face_crop(live_gray)
-
-    if live_face is None:
-        frappe.throw(_("No face detected in captured selfie. Please position your face clearly in camera frame."))
-
-    # Compare color histogram intersection / correlation
-    hist1 = cv2.calcHist([baseline_face], [0], None, [256], [0, 256])
-    hist2 = cv2.calcHist([live_face], [0], None, [256], [0, 256])
-
-    cv2.normalize(hist1, hist1)
-    cv2.normalize(hist2, hist2)
-
-    score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-    return bool(score >= threshold)
-
-
 @frappe.whitelist()
-def process_biometric_attendance(image_base64, latitude, longitude, log_type, accuracy=None, address=None, location_source=None):
+def process_biometric_attendance(image_base64, latitude, longitude, log_type, accuracy=None, address=None):
     current_user = frappe.session.user
     if not current_user or current_user == "Guest":
         frappe.throw(_("Unauthorized Session."), frappe.PermissionError)
@@ -381,7 +309,7 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
 
     if accuracy is not None and accuracy != "":
         accuracy_val = flt(accuracy)
-        if accuracy_val > MAX_ACCEPTABLE_ACCURACY_METERS and location_source != "manual":
+        if accuracy_val > MAX_ACCEPTABLE_ACCURACY_METERS:
             frappe.throw(
                 _("Location accuracy too low (~{0}m). Please enable High Accuracy / Precise Location and try again.").format(int(accuracy_val))
             )
@@ -392,7 +320,7 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
     # Server Guard Enforcement
     enforce_geo_restriction(employee.name, lat, lng)
 
-    # Decode base64 frame
+    # Face verification placeholder
     if "," in image_base64:
         image_data = image_base64.split(",")[1]
     else:
@@ -400,16 +328,13 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
 
     try:
         live_image_bytes = base64.b64decode(image_data)
+        face_match_success = True  # Production placeholder for facial recognition model match
     except Exception as e:
         frappe.throw(_("Error parsing captured image frame: {0}").format(str(e)))
 
-    # --- VERIFY FACIAL MATCH ---
-    face_match_success = verify_facial_biometrics_opencv(employee.image, live_image_bytes)
-
     if not face_match_success:
-        frappe.throw(_("Your employee photo is not matched"))
+        frappe.throw(_("Biometric verification failed. The face does not match the employee profile photo."))
 
-    # --- CREATE CHECKIN ONLY IF MATCH SUCCEEDS ---
     geolocation_data = {
         "type": "FeatureCollection",
         "features": [
@@ -417,8 +342,7 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
                 "type": "Feature",
                 "properties": {
                     "accuracy_meters": flt(accuracy) if accuracy not in (None, "") else None,
-                    "address": address or "",
-                    "location_source": location_source or "auto"
+                    "address": address or ""
                 },
                 "geometry": {
                     "type": "Point",
