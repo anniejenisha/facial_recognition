@@ -4,11 +4,21 @@ from frappe.utils import now_datetime, format_time, flt, today, get_system_timez
 import base64
 import json
 import math
+import os
+import io
 
 try:
     import pytz
 except ImportError:
     pytz = None
+
+try:
+    import face_recognition
+    from PIL import Image
+    import numpy as np
+    HAS_FACE_RECOGNITION = True
+except ImportError:
+    HAS_FACE_RECOGNITION = False
 
 MAX_ACCEPTABLE_ACCURACY_METERS = 200
 GEO_RESTRICTION_DOCTYPE = "Geo Restrictions"
@@ -288,8 +298,62 @@ def check_location_restriction(latitude, longitude):
     return _evaluate_geo_restriction(employee_name, flt(latitude), flt(longitude))
 
 
+# --- FACIAL MATCHING ENGINE ---
+
+def verify_facial_biometrics(stored_image_url, live_image_bytes, tolerance=0.55):
+    """
+    Compares captured webcam selfie against Employee Master image.
+    Returns True if face match distance <= tolerance.
+    """
+    if not HAS_FACE_RECOGNITION:
+        frappe.throw(_("face_recognition or dlib library is not installed on the server environment."))
+
+    # 1. Resolve stored image path on server file system
+    if stored_image_url.startswith("/private"):
+        file_path = frappe.get_site_path(stored_image_url.lstrip("/"))
+    elif stored_image_url.startswith("/files"):
+        file_path = frappe.get_site_path("public", stored_image_url.lstrip("/"))
+    else:
+        file_path = frappe.get_site_path("public", "files", os.path.basename(stored_image_url))
+
+    if not os.path.exists(file_path):
+        frappe.throw(_("Baseline employee profile photo file not found on server storage path."))
+
+    try:
+        # Load baseline image
+        baseline_img = face_recognition.load_image_file(file_path)
+        baseline_encodings = face_recognition.face_encodings(baseline_img)
+
+        if not baseline_encodings:
+            frappe.throw(_("No face detected in stored Employee Master profile image."))
+
+        baseline_encoding = baseline_encodings[0]
+
+        # Load live captured selfie from stream
+        live_pil = Image.open(io.BytesIO(live_image_bytes)).convert("RGB")
+        live_img_np = np.array(live_pil)
+        live_encodings = face_recognition.face_encodings(live_img_np)
+
+        if not live_encodings:
+            frappe.throw(_("No face detected in captured selfie. Please position your face clearly in camera frame."))
+
+        live_encoding = live_encodings[0]
+
+        # Calculate distance metric
+        distances = face_recognition.face_distance([baseline_encoding], live_encoding)
+        match_distance = distances[0]
+
+        return bool(match_distance <= tolerance)
+
+    except frappe.ValidationError:
+        raise
+    except Exception as e:
+        frappe.log_error(title="Facial Biometric Matching Failed", message=frappe.get_traceback())
+        frappe.throw(_("Error evaluating biometric facial match: {0}").format(str(e)))
+
+
 @frappe.whitelist()
-def process_biometric_attendance(image_base64, latitude, longitude, log_type, accuracy=None, address=None):
+def process_biometric_attendance(image_base64, latitude, longitude, log_type, accuracy=None, address=None, location_source=None):
     current_user = frappe.session.user
     if not current_user or current_user == "Guest":
         frappe.throw(_("Unauthorized Session."), frappe.PermissionError)
@@ -309,7 +373,7 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
 
     if accuracy is not None and accuracy != "":
         accuracy_val = flt(accuracy)
-        if accuracy_val > MAX_ACCEPTABLE_ACCURACY_METERS:
+        if accuracy_val > MAX_ACCEPTABLE_ACCURACY_METERS and location_source != "manual":
             frappe.throw(
                 _("Location accuracy too low (~{0}m). Please enable High Accuracy / Precise Location and try again.").format(int(accuracy_val))
             )
@@ -320,7 +384,7 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
     # Server Guard Enforcement
     enforce_geo_restriction(employee.name, lat, lng)
 
-    # Face verification placeholder
+    # Decode camera frame
     if "," in image_base64:
         image_data = image_base64.split(",")[1]
     else:
@@ -328,13 +392,17 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
 
     try:
         live_image_bytes = base64.b64decode(image_data)
-        face_match_success = True  # Production placeholder for facial recognition model match
     except Exception as e:
         frappe.throw(_("Error parsing captured image frame: {0}").format(str(e)))
 
-    if not face_match_success:
-        frappe.throw(_("Biometric verification failed. The face does not match the employee profile photo."))
+    # --- EXECUTE BIOMETRIC VERIFICATION ---
+    face_match_success = verify_facial_biometrics(employee.image, live_image_bytes)
 
+    # Throw error and halt transaction if face does not match
+    if not face_match_success:
+        frappe.throw(_("Your employee photo is not matched"))
+
+    # --- CREATE CHECK-IN DOCUMENT (ONLY EXECUTED IF FACE MATCHES) ---
     geolocation_data = {
         "type": "FeatureCollection",
         "features": [
@@ -342,7 +410,8 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
                 "type": "Feature",
                 "properties": {
                     "accuracy_meters": flt(accuracy) if accuracy not in (None, "") else None,
-                    "address": address or ""
+                    "address": address or "",
+                    "location_source": location_source or "auto"
                 },
                 "geometry": {
                     "type": "Point",
