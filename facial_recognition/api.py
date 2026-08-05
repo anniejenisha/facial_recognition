@@ -13,12 +13,12 @@ except ImportError:
     pytz = None
 
 try:
-    import face_recognition
-    from PIL import Image
+    import cv2
     import numpy as np
-    HAS_FACE_RECOGNITION = True
+    from PIL import Image
+    HAS_CV2 = True
 except ImportError:
-    HAS_FACE_RECOGNITION = False
+    HAS_CV2 = False
 
 MAX_ACCEPTABLE_ACCURACY_METERS = 200
 GEO_RESTRICTION_DOCTYPE = "Geo Restrictions"
@@ -298,17 +298,27 @@ def check_location_restriction(latitude, longitude):
     return _evaluate_geo_restriction(employee_name, flt(latitude), flt(longitude))
 
 
-# --- FACIAL MATCHING ENGINE ---
+# --- OPENCV FACIAL MATCHING ENGINE (No dlib/cmake required) ---
 
-def verify_facial_biometrics(stored_image_url, live_image_bytes, tolerance=0.55):
-    """
-    Compares captured webcam selfie against Employee Master image.
-    Returns True if face match distance <= tolerance.
-    """
-    if not HAS_FACE_RECOGNITION:
-        frappe.throw(_("face_recognition or dlib library is not installed on the server environment."))
+def extract_face_crop(img_gray):
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    face_cascade = cv2.CascadeClassifier(cascade_path)
+    faces = face_cascade.detectMultiScale(img_gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+    
+    if len(faces) == 0:
+        return None
 
-    # 1. Resolve stored image path on server file system
+    # Pick largest face detected
+    x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
+    face_crop = img_gray[y:y+h, x:x+w]
+    return cv2.resize(face_crop, (150, 150))
+
+
+def verify_facial_biometrics_opencv(stored_image_url, live_image_bytes, threshold=0.55):
+    if not HAS_CV2:
+        frappe.throw(_("opencv-python-headless is not installed in bench python environment."))
+
+    # Resolve local server file path
     if stored_image_url.startswith("/private"):
         file_path = frappe.get_site_path(stored_image_url.lstrip("/"))
     elif stored_image_url.startswith("/files"):
@@ -319,37 +329,35 @@ def verify_facial_biometrics(stored_image_url, live_image_bytes, tolerance=0.55)
     if not os.path.exists(file_path):
         frappe.throw(_("Baseline employee profile photo file not found on server storage path."))
 
-    try:
-        # Load baseline image
-        baseline_img = face_recognition.load_image_file(file_path)
-        baseline_encodings = face_recognition.face_encodings(baseline_img)
+    # Load baseline image
+    baseline_bgr = cv2.imread(file_path)
+    if baseline_bgr is None:
+        frappe.throw(_("Failed to read Employee Master profile photo."))
 
-        if not baseline_encodings:
-            frappe.throw(_("No face detected in stored Employee Master profile image."))
+    baseline_gray = cv2.cvtColor(baseline_bgr, cv2.COLOR_BGR2GRAY)
+    baseline_face = extract_face_crop(baseline_gray)
 
-        baseline_encoding = baseline_encodings[0]
+    if baseline_face is None:
+        frappe.throw(_("No face detected in stored Employee Master profile image."))
 
-        # Load live captured selfie from stream
-        live_pil = Image.open(io.BytesIO(live_image_bytes)).convert("RGB")
-        live_img_np = np.array(live_pil)
-        live_encodings = face_recognition.face_encodings(live_img_np)
+    # Load live selfie frame
+    live_pil = Image.open(io.BytesIO(live_image_bytes)).convert("RGB")
+    live_bgr = cv2.cvtColor(np.array(live_pil), cv2.COLOR_RGB2BGR)
+    live_gray = cv2.cvtColor(live_bgr, cv2.COLOR_BGR2GRAY)
+    live_face = extract_face_crop(live_gray)
 
-        if not live_encodings:
-            frappe.throw(_("No face detected in captured selfie. Please position your face clearly in camera frame."))
+    if live_face is None:
+        frappe.throw(_("No face detected in captured selfie. Please position your face clearly in camera frame."))
 
-        live_encoding = live_encodings[0]
+    # Compare color histogram intersection / correlation
+    hist1 = cv2.calcHist([baseline_face], [0], None, [256], [0, 256])
+    hist2 = cv2.calcHist([live_face], [0], None, [256], [0, 256])
 
-        # Calculate distance metric
-        distances = face_recognition.face_distance([baseline_encoding], live_encoding)
-        match_distance = distances[0]
+    cv2.normalize(hist1, hist1)
+    cv2.normalize(hist2, hist2)
 
-        return bool(match_distance <= tolerance)
-
-    except frappe.ValidationError:
-        raise
-    except Exception as e:
-        frappe.log_error(title="Facial Biometric Matching Failed", message=frappe.get_traceback())
-        frappe.throw(_("Error evaluating biometric facial match: {0}").format(str(e)))
+    score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+    return bool(score >= threshold)
 
 
 @frappe.whitelist()
@@ -384,7 +392,7 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
     # Server Guard Enforcement
     enforce_geo_restriction(employee.name, lat, lng)
 
-    # Decode camera frame
+    # Decode base64 frame
     if "," in image_base64:
         image_data = image_base64.split(",")[1]
     else:
@@ -395,14 +403,13 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
     except Exception as e:
         frappe.throw(_("Error parsing captured image frame: {0}").format(str(e)))
 
-    # --- EXECUTE BIOMETRIC VERIFICATION ---
-    face_match_success = verify_facial_biometrics(employee.image, live_image_bytes)
+    # --- VERIFY FACIAL MATCH ---
+    face_match_success = verify_facial_biometrics_opencv(employee.image, live_image_bytes)
 
-    # Throw error and halt transaction if face does not match
     if not face_match_success:
         frappe.throw(_("Your employee photo is not matched"))
 
-    # --- CREATE CHECK-IN DOCUMENT (ONLY EXECUTED IF FACE MATCHES) ---
+    # --- CREATE CHECKIN ONLY IF MATCH SUCCEEDS ---
     geolocation_data = {
         "type": "FeatureCollection",
         "features": [
