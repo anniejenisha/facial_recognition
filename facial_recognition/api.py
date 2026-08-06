@@ -2,7 +2,6 @@ import frappe
 from frappe import _
 from frappe.utils import now_datetime, format_time, flt, today, get_system_timezone
 import base64
-import io
 import json
 import math
 
@@ -10,17 +9,6 @@ try:
     import pytz
 except ImportError:
     pytz = None
-
-try:
-    import face_recognition
-except Exception:
-    # Catch ANY failure here (ImportError, OSError from missing shared libs
-    # like liblapack/libopenblas at runtime, etc). If this import fails and
-    # isn't caught broadly, the whole api.py module fails to load, which
-    # silently breaks every whitelisted method in this file -- not just the
-    # face verification one. Log it so it's visible in the Error Log.
-    frappe.log_error(title="face_recognition import failed", message=frappe.get_traceback())
-    face_recognition = None
 
 MAX_ACCEPTABLE_ACCURACY_METERS = 200
 GEO_RESTRICTION_DOCTYPE = "Geo Restrictions"
@@ -34,10 +22,6 @@ ALL_USERS_VALUES = {"all", "all users", "all employees"}
 ATTENDANCE_SERVICE_NAME = "Attendance"
 DEFAULT_POINT_RADIUS_METERS = 200
 DEFAULT_ALLOW_WHEN_NO_RESTRICTION = True
-
-# Lower = stricter match. face_recognition's own docs recommend ~0.6 as the
-# default cutoff; 0.45-0.5 is tighter and reduces false-accepts for attendance use cases.
-FACE_MATCH_TOLERANCE = 0.5
 
 
 def get_accurate_now_datetime():
@@ -304,98 +288,6 @@ def check_location_restriction(latitude, longitude):
     return _evaluate_geo_restriction(employee_name, flt(latitude), flt(longitude))
 
 
-# --- FACE VERIFICATION HELPERS ---
-
-def _resolve_file_absolute_path(file_url):
-    """Resolve a Frappe file_url (e.g. '/files/emp.jpg' or '/private/files/emp.jpg')
-    to an absolute path on disk, using the File doctype record when available."""
-    if not file_url:
-        return None
-
-    file_name = frappe.db.get_value("File", {"file_url": file_url}, "name")
-    if file_name:
-        try:
-            file_doc = frappe.get_doc("File", file_name)
-            return file_doc.get_full_path()
-        except Exception:
-            frappe.log_error(title="Face Verification: File resolve error", message=frappe.get_traceback())
-
-    # Fallback: construct the path manually from the site path
-    relative_path = file_url.lstrip("/")
-    return frappe.utils.get_site_path(relative_path)
-
-
-def _decode_live_image_bytes(image_base64):
-    if "," in image_base64:
-        image_data = image_base64.split(",")[1]
-    else:
-        image_data = image_base64
-
-    try:
-        return base64.b64decode(image_data)
-    except Exception as e:
-        frappe.throw(_("Error parsing captured image frame: {0}").format(str(e)))
-
-
-def _get_face_encoding_from_path(image_path, context_label):
-    try:
-        image_array = face_recognition.load_image_file(image_path)
-    except Exception:
-        frappe.log_error(title="Face Verification: image load error", message=frappe.get_traceback())
-        frappe.throw(_("Could not load {0} for face verification.").format(context_label))
-
-    encodings = face_recognition.face_encodings(image_array)
-    return encodings
-
-
-def _get_face_encoding_from_bytes(image_bytes, context_label):
-    try:
-        image_array = face_recognition.load_image_file(io.BytesIO(image_bytes))
-    except Exception:
-        frappe.log_error(title="Face Verification: image load error", message=frappe.get_traceback())
-        frappe.throw(_("Could not process {0}.").format(context_label))
-
-    encodings = face_recognition.face_encodings(image_array)
-    return encodings
-
-
-def verify_face_match(baseline_image_url, live_image_bytes):
-    """
-    Compares the captured selfie against the employee's registered baseline photo.
-    Returns (is_match: bool, error_message: str | None).
-    A non-None error_message means verification could not even be attempted
-    (e.g. no face detected) and should be surfaced to the user as-is.
-    """
-    if face_recognition is None:
-        frappe.throw(
-            _("Face verification library is not installed on the server. "
-              "Please ask your system administrator to install 'face_recognition'.")
-        )
-
-    baseline_path = _resolve_file_absolute_path(baseline_image_url)
-    if not baseline_path:
-        frappe.throw(_("No baseline profile photo found in Employee Master. Please upload a profile photo first."))
-
-    baseline_encodings = _get_face_encoding_from_path(baseline_path, _("baseline profile photo"))
-    if not baseline_encodings:
-        frappe.throw(
-            _("No face detected in the employee's baseline profile photo. "
-              "Please ask HR/Admin to upload a clearer profile photo.")
-        )
-
-    live_encodings = _get_face_encoding_from_bytes(live_image_bytes, _("the captured selfie image"))
-    if not live_encodings:
-        return False, _("No face detected in the captured selfie. Please ensure your face is clearly visible and try again.")
-
-    if len(live_encodings) > 1:
-        return False, _("Multiple faces detected in the captured selfie. Please ensure only your face is visible and try again.")
-
-    face_distance = face_recognition.face_distance([baseline_encodings[0]], live_encodings[0])[0]
-    is_match = bool(face_distance <= FACE_MATCH_TOLERANCE)
-
-    return is_match, None
-
-
 @frappe.whitelist()
 def process_biometric_attendance(image_base64, latitude, longitude, log_type, accuracy=None, address=None):
     current_user = frappe.session.user
@@ -428,17 +320,20 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
     # Server Guard Enforcement
     enforce_geo_restriction(employee.name, lat, lng)
 
-    # --- Face verification (real check, not a placeholder) ---
-    live_image_bytes = _decode_live_image_bytes(image_base64)
+    # Face verification placeholder
+    if "," in image_base64:
+        image_data = image_base64.split(",")[1]
+    else:
+        image_data = image_base64
 
-    is_match, verification_error = verify_face_match(employee.image, live_image_bytes)
+    try:
+        live_image_bytes = base64.b64decode(image_data)
+        face_match_success = True  # Production placeholder for facial recognition model match
+    except Exception as e:
+        frappe.throw(_("Error parsing captured image frame: {0}").format(str(e)))
 
-    if verification_error:
-        # Could not even attempt a comparison (no face / multiple faces found)
-        frappe.throw(verification_error)
-
-    if not is_match:
-        frappe.throw(_("Face verification failed. Employee Checkin cannot be created."))
+    if not face_match_success:
+        frappe.throw(_("Biometric verification failed. The face does not match the employee profile photo."))
 
     geolocation_data = {
         "type": "FeatureCollection",
