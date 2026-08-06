@@ -13,7 +13,13 @@ except ImportError:
 
 try:
     import face_recognition
-except ImportError:
+except Exception:
+    # Catch ANY failure here (ImportError, OSError from missing shared libs
+    # like liblapack/libopenblas at runtime, etc). If this import fails and
+    # isn't caught broadly, the whole api.py module fails to load, which
+    # silently breaks every whitelisted method in this file -- not just the
+    # face verification one. Log it so it's visible in the Error Log.
+    frappe.log_error(title="face_recognition import failed", message=frappe.get_traceback())
     face_recognition = None
 
 MAX_ACCEPTABLE_ACCURACY_METERS = 200
