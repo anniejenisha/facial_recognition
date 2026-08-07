@@ -22,6 +22,19 @@ requires = ["flit_core >=3.4,<4"]
 build-backend = "flit_core.buildapi"
 
 # --- This is the part Frappe Cloud reads to install system-level (apt) packages
-# before it runs pip install, since dlib needs to be compiled from C++ source.
+# before it runs pip install, since dlib needs to be compiled from C++ source,
+# and opencv/insightface need these shared libraries at runtime (fixes
+# "libGL.so.1: cannot open shared object file" and similar errors).
 [deploy.dependencies.apt]
-packages = ["cmake", "build-essential", "libopenblas-dev", "liblapack-dev"]
+packages = [
+    "cmake",
+    "build-essential",
+    "libopenblas-dev",
+    "liblapack-dev",
+    "libgl1",
+    "libglib2.0-0",
+    "libsm6",
+    "libxext6",
+    "libxrender1",
+    "libgomp1"
+]
