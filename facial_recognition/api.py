@@ -1,9 +1,12 @@
 import frappe
 from frappe import _
-from frappe.utils import now_datetime, format_time, flt, today, get_system_timezone
+from frappe.utils import now_datetime, format_time, flt, today, get_system_timezone, get_site_path
 import base64
 import json
 import math
+import os
+import uuid
+import numpy as np
 
 try:
     import pytz
@@ -288,6 +291,80 @@ def check_location_restriction(latitude, longitude):
     return _evaluate_geo_restriction(employee_name, flt(latitude), flt(longitude))
 
 
+# ── Face Matching Helpers ─────────────────────────────────────────────────
+_face_app = None
+
+
+def _get_face_app():
+    import insightface
+    app = insightface.app.FaceAnalysis(name="buffalo_sc", providers=["CPUExecutionProvider"])
+    app.prepare(ctx_id=0, det_size=(640, 640))
+    return app
+
+
+def _get_absolute_path(file_url: str) -> str:
+    from frappe.utils.file_manager import get_file_path
+    if file_url.startswith("/files/"):
+        path = frappe.get_site_path("public", "files", file_url[len("/files/"):])
+    elif file_url.startswith("/private/files/"):
+        path = frappe.get_site_path("private", "files", file_url[len("/private/files/"):])
+    else:
+        path = get_file_path(file_url)
+    return os.path.abspath(path)
+
+
+def _get_embedding(app, image_path: str):
+    import cv2
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+    faces = app.get(img)
+    if not faces:
+        return None
+    face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+    return face.embedding
+
+
+def _cosine_similarity(a, b) -> float:
+    a = a / np.linalg.norm(a)
+    b = b / np.linalg.norm(b)
+    return float(np.dot(a, b))
+
+
+def _verify_face_match(live_image_bytes, employee_profile_image_url):
+    """
+    Saves the captured live image to a temp file, extracts its embedding,
+    compares it against the employee's baseline profile photo.
+    Returns (is_match: bool, score: float).
+    """
+    global _face_app
+    if _face_app is None:
+        _face_app = _get_face_app()
+
+    tmp_dir = get_site_path("private", "files", "tmp_biometric")
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.jpg")
+
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(live_image_bytes)
+
+        live_emb = _get_embedding(_face_app, tmp_path)
+        if live_emb is None:
+            return False, 0.0
+
+        ref_emb = _get_embedding(_face_app, _get_absolute_path(employee_profile_image_url))
+        if ref_emb is None:
+            return False, 0.0
+
+        score = round(_cosine_similarity(live_emb, ref_emb) * 100, 2)
+        threshold = 50
+        return score >= threshold, score
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 @frappe.whitelist()
 def process_biometric_attendance(image_base64, latitude, longitude, log_type, accuracy=None, address=None):
     current_user = frappe.session.user
@@ -320,7 +397,7 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
     # Server Guard Enforcement
     enforce_geo_restriction(employee.name, lat, lng)
 
-    # Face verification placeholder
+    # ── Real face verification ───────────────────────────────────────────
     if "," in image_base64:
         image_data = image_base64.split(",")[1]
     else:
@@ -328,12 +405,19 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
 
     try:
         live_image_bytes = base64.b64decode(image_data)
-        face_match_success = True  # Production placeholder for facial recognition model match
     except Exception as e:
         frappe.throw(_("Error parsing captured image frame: {0}").format(str(e)))
 
+    try:
+        face_match_success, match_score = _verify_face_match(live_image_bytes, employee.image)
+    except Exception as e:
+        frappe.log_error(f"Face Match Error: {str(e)}", "Biometric Attendance")
+        frappe.throw(_("Face verification could not be completed. Please try again."))
+
     if not face_match_success:
-        frappe.throw(_("Biometric verification failed. The face does not match the employee profile photo."))
+        frappe.throw(
+            _("Biometric verification failed. The face does not match the employee profile photo (score: {0}%).").format(match_score)
+        )
 
     geolocation_data = {
         "type": "FeatureCollection",
@@ -362,7 +446,8 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
         "device_id": "Webcam Facial Terminal",
         "latitude": lat,
         "longitude": lng,
-        "geolocation": json.dumps(geolocation_data)
+        "geolocation": json.dumps(geolocation_data),
+        "custom_face_match_score": match_score
     })
 
     checkin_doc.insert(ignore_permissions=True)
@@ -373,5 +458,53 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
 
     return {
         "status": "Success",
-        "message": _("Biometric log registered successfully: {0} at {1}").format(action_text, railway_time)
+        "message": _("Biometric log registered successfully: {0} at {1}").format(action_text, railway_time),
+        "match_score": match_score
     }
+
+
+def send_checkout_reminders():
+    """
+    Run hourly via scheduler.
+    Emails employees who checked IN more than 9 hours ago with no OUT.
+    """
+    from frappe.utils import add_to_date
+
+    cutoff = add_to_date(get_accurate_now_datetime(), hours=-9)
+
+    missed_ins = frappe.get_all(
+        "Employee Checkin",
+        filters={
+            "log_type": "IN",
+            "time": ["<=", cutoff]
+        },
+        fields=["name", "employee", "time"]
+    )
+
+    for rec in missed_ins:
+        has_out = frappe.db.exists("Employee Checkin", {
+            "employee": rec.employee,
+            "log_type": "OUT",
+            "time": [">=", rec.time]
+        })
+        if has_out:
+            continue
+
+        emp = frappe.get_doc("Employee", rec.employee)
+        if not emp.user_id:
+            continue
+
+        frappe.sendmail(
+            recipients=[emp.user_id],
+            subject="⏰ Reminder: You haven't checked out yet",
+            message=f"""
+                <p>Hi <strong>{emp.employee_name}</strong>,</p>
+                <p>You checked in at <strong>{rec.time}</strong>
+                but haven't marked your check-out yet.</p>
+                <p>Please check out to record your working hours correctly.</p>
+                <br>
+                <p style="color:#888;font-size:12px;">
+                    This is an automated reminder from the HR system.
+                </p>
+            """
+        )
