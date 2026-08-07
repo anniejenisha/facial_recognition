@@ -416,7 +416,7 @@ def process_biometric_attendance(image_base64, latitude, longitude, log_type, ac
 
     if not face_match_success:
         frappe.throw(
-            _("Biometric verification failed. The face does not match the employee profile photo (score: {0}%).").format(match_score)
+            _("Biometric verification failed. The face does not match the employee profile photo.")
         )
 
     geolocation_data = {
