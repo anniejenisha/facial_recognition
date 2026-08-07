@@ -1,7 +1,7 @@
 [project]
 name = "facial_recognition"
 authors = [
-    { name = "Your Company Name", email = "you@example.com"}
+    { name = "Your Company Name", email = "you@example.com" }
 ]
 description = "Facial recognition based attendance for Frappe"
 requires-python = ">=3.10"
@@ -10,6 +10,11 @@ dynamic = ["version"]
 dependencies = [
     "dlib",
     "face_recognition",
+    "insightface",
+    "opencv-python-headless",
+    "onnxruntime",
+    "numpy",
+    "pytz",
 ]
 
 [build-system]
