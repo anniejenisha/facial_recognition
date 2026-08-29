@@ -78,6 +78,12 @@
    "reqd": 1
   },
   {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer"
+  },
+  {
    "fieldname": "sec_break_trade",
    "fieldtype": "Section Break",
    "label": "Trade Terms"
@@ -117,6 +123,11 @@
    "label": "Price Offered (KES/kg)"
   },
   {
+   "fieldname": "weighbridge_capture_section",
+   "fieldtype": "Section Break",
+   "label": "Weighbridge Capture"
+  },
+  {
    "fieldname": "gross_weight_kg",
    "fieldtype": "Float",
    "label": "Gross weight (kg)"
@@ -137,10 +148,19 @@
    "label": "Weighbridge ticket number"
   },
   {
+   "fieldname": "column_break_3omr",
+   "fieldtype": "Column Break"
+  },
+  {
    "fieldname": "transporter",
    "fieldtype": "Link",
    "label": "Transporter",
    "options": "Vehicle"
+  },
+  {
+   "fieldname": "vehicle_registration",
+   "fieldtype": "Data",
+   "label": "Vehicle Registration"
   },
   {
    "fieldname": "weighbridge_slip_gross_in",
@@ -156,15 +176,6 @@
    "fieldname": "net_weight_calculated",
    "fieldtype": "Data",
    "label": "Net weight (calculated)"
-  },
-  {
-   "fieldname": "weighbridge_capture_section",
-   "fieldtype": "Section Break",
-   "label": "Weighbridge Capture"
-  },
-  {
-   "fieldname": "column_break_3omr",
-   "fieldtype": "Column Break"
   },
   {
    "fieldname": "quality_inspection_section",
@@ -187,6 +198,10 @@
    "label": "Aflatoxin ppb"
   },
   {
+   "fieldname": "column_break_p0qz",
+   "fieldtype": "Column Break"
+  },
+  {
    "fieldname": "county",
    "fieldtype": "Link",
    "label": "County",
@@ -201,10 +216,6 @@
    "fieldname": "reason_code_if_foreign_matter_judgement_or_wet_buy",
    "fieldtype": "Small Text",
    "label": "Reason code (if foreign matter judgement or wet buy)"
-  },
-  {
-   "fieldname": "column_break_p0qz",
-   "fieldtype": "Column Break"
   },
   {
    "fieldname": "transport_charges_section",
@@ -227,6 +238,11 @@
    "label": "Offloading (KES)"
   },
   {
+   "fieldname": "sell_rate",
+   "fieldtype": "Currency",
+   "label": "Sell Rate"
+  },
+  {
    "fieldname": "loss_reconciliation_section",
    "fieldtype": "Section Break",
    "label": "Loss Reconciliation"
@@ -242,22 +258,6 @@
    "label": "Delivered Quantity (kg)"
   },
   {
-   "fieldname": "vehicle_registration",
-   "fieldtype": "Data",
-   "label": "Vehicle Registration"
-  },
-  {
-   "fieldname": "customer",
-   "fieldtype": "Link",
-   "label": "Customer",
-   "options": "Customer"
-  },
-  {
-   "fieldname": "sell_rate",
-   "fieldtype": "Currency",
-   "label": "Sell Rate"
-  },
-  {
    "fieldname": "invoice_number",
    "fieldtype": "Data",
    "label": "Invoice Number"
@@ -265,7 +265,7 @@
  ],
  "hide_toolbar": 1,
  "links": [],
- "modified": "2026-08-29 10:53:53.322390",
+ "modified": "2026-08-29 16:27:46.546615",
  "modified_by": "Administrator",
  "module": "Facial Recognition",
  "name": "Buy Ticket",
