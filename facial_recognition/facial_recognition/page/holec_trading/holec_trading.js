@@ -489,7 +489,10 @@ function init_holec_trading_engine() {
                 <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;margin-bottom:16px;">
                     <div style="display:flex;flex-direction:column;gap:6px;">
                         <label style="font-size:13px;font-weight:500;color:#4a5568;">KRA PIN certificate</label>
-                        <button type="button" id="upload-kra-btn" style="padding:8px 12px;border:1px solid #cbd5e0;border-radius:6px;background:#fff;cursor:pointer;width:fit-content;font-size:13px;color:#2d3748;">⬆ Upload</button>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <button type="button" id="upload-kra-btn" style="padding:8px 12px;border:1px solid #cbd5e0;border-radius:6px;background:#fff;cursor:pointer;width:fit-content;font-size:13px;color:#2d3748;">⬆ Upload</button>
+                            <span id="kra-file-name" style="font-size:13px;color:#4a5568;font-style:italic;">No file chosen</span>
+                        </div>
                     </div>
                     ${field({ label: 'KRA PIN *', id: 'ns-krapin', required: true, placeholder: 'Auto-filled on certificate upload' })}
                     ${field({ label: 'VAT status', id: 'ns-vat', type: 'select', options: ['Registered', 'Exempt', 'Not Registered'] })}
@@ -511,7 +514,10 @@ function init_holec_trading_engine() {
                     ${field({ label: 'Preferred payment rail', id: 'ns-rail', type: 'select', options: ['Bank Transfer', 'RTGS', 'EFT', 'Cheque'] })}
                     <div style="display:flex;flex-direction:column;gap:6px;">
                         <label style="font-size:13px;font-weight:500;color:#4a5568;">Bank Letter / Statement *</label>
-                        <button type="button" id="upload-bank-letter-btn" style="padding:8px 12px;border:1px solid #cbd5e0;border-radius:6px;background:#fff;cursor:pointer;width:fit-content;font-size:13px;color:#2d3748;">⬆ Upload</button>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <button type="button" id="upload-bank-letter-btn" style="padding:8px 12px;border:1px solid #cbd5e0;border-radius:6px;background:#fff;cursor:pointer;width:fit-content;font-size:13px;color:#2d3748;">⬆ Upload</button>
+                            <span id="bank-letter-file-name" style="font-size:13px;color:#4a5568;font-style:italic;">No file chosen</span>
+                        </div>
                         <input type="hidden" id="ns-bank-letter" value="">
                     </div>
                 </div>
@@ -539,8 +545,22 @@ function init_holec_trading_engine() {
         });
 
         document.getElementById('upload-kra-btn').addEventListener('click', () => {
-            $('#ns-krapin').val('A011223344B');
-            showToast('KRA PIN certificate uploaded and KRA PIN auto-filled');
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.accept = '.pdf,.jpg,.jpeg,.png';
+            fileInput.onchange = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = function(uploadEvent) {
+                        $('#ns-krapin').val('A009876543Z');
+                        $('#kra-file-name').text(file.name).css({ color: '#276749', 'font-style': 'normal', 'font-weight': '500' });
+                        showToast('KRA PIN certificate uploaded, attached, and KRA PIN auto-filled');
+                    };
+                    reader.readAsDataURL(file);
+                }
+            };
+            fileInput.click();
         });
 
         document.getElementById('upload-bank-letter-btn').addEventListener('click', () => {
@@ -553,7 +573,8 @@ function init_holec_trading_engine() {
                     const reader = new FileReader();
                     reader.onload = function(uploadEvent) {
                         $('#ns-bank-letter').val(uploadEvent.target.result);
-                        showToast('Bank Letter / Statement uploaded successfully');
+                        $('#bank-letter-file-name').text(file.name).css({ color: '#276749', 'font-style': 'normal', 'font-weight': '500' });
+                        showToast('Bank Letter / Statement uploaded and attached successfully');
                     };
                     reader.readAsDataURL(file);
                 }
@@ -641,7 +662,7 @@ function init_holec_trading_engine() {
                     bank_branch: branch,
                     account_number: accountNo,
                     account_name: accountName,
-                    custom_bank_letter: bankLetter,
+                    bank_letter: bankLetter,
                     holec_contacts: contactsToSave
                 });
 
@@ -2522,7 +2543,7 @@ function init_holec_trading_engine() {
             <div id="sidebar-payments-btn" style="padding:6px 10px;color:#4a5568;font-size:13px;cursor:pointer;border-radius:4px;margin-bottom:8px;" onmouseover="this.style.background='#f7fafc'" onmouseout="this.style.background='transparent'">Payments</div>
 
             <div style="font-size:11px;font-weight:700;color:#a0aec0;letter-spacing:0.05em;margin-bottom:6px;">INSIGHT</div>
-            <div class="mod-item ${route.module === 'ledger' ? 'active' : ''}" data-mod="ledger" style="padding:6px 10px;border-radius:6px;background:${route.module === 'ledger' ? '#ebf8ff' : 'transparent'};color:${route.module === 'ledger' ? '#2b6cb0' : '#4a5568'};font-weight:${route.module === 'ledger' ? '600' : '400'};cursor:pointer;font-size:13px;margin-bottom:2px;" onmouseover="if(route.module!=='ledger')this.style.background='#f7fafc'" onmouseout="if(route.module!=='ledger')this.style.background='transparent'">Cost ledger & margin</div>
+            <div class="mod-item ${route.module === 'ledger' ? 'active' : ''}" data-mod="ledger" style="padding:6px 10px;border-radius:6px;background:${route.module === 'ledger' ? '#ebf8ff' : 'transparent'};color:${route.module === 'ledger' ? '#2b6cb0' : '#4a5568'};font-weight:${route.module === 'ledger' ? '600' : '400'};cursor:pointer;font-size:13px;margin-bottom:2px;" onmouseover="if(route.module!=='ledger')this.style.background='#f7fafc'" onmouseout="if(route.module!=='ledger')this.style.background='transparent'">Cost ledger & margin --></div>
             <div class="mod-item ${route.module === 'reports' ? 'active' : ''}" data-mod="reports" style="padding:6px 10px;border-radius:6px;background:${route.module === 'reports' ? '#ebf8ff' : 'transparent'};color:${route.module === 'reports' ? '#2b6cb0' : '#4a5568'};font-weight:${route.module === 'reports' ? '600' : '400'};cursor:pointer;font-size:13px;margin-bottom:2px;" onmouseover="if(route.module!=='reports')this.style.background='#f7fafc'" onmouseout="if(route.module!=='reports')this.style.background='transparent'">Reports</div>
             <div class="mod-item ${route.module === 'event_log' ? 'active' : ''}" data-mod="event_log" style="padding:6px 10px;border-radius:6px;background:${route.module === 'event_log' ? '#ebf8ff' : 'transparent'};color:${route.module === 'event_log' ? '#2b6cb0' : '#4a5568'};font-weight:${route.module === 'event_log' ? '600' : '400'};cursor:pointer;font-size:13px;" onmouseover="if(route.module!=='event_log')this.style.background='#f7fafc'" onmouseout="if(route.module!=='event_log')this.style.background='transparent'">Trade event log</div>
         `;
