@@ -1,21 +1,19 @@
 {
  "content": null,
- "creation": "2026-07-20 09:50:29.769043",
+ "creation": "2026-08-24 17:54:40.152061",
  "docstatus": 0,
  "doctype": "Page",
  "idx": 0,
- "modified": "2026-08-20 16:38:15.306056",
+ "modified": "2026-08-29 14:35:00.500625",
  "modified_by": "Administrator",
  "module": "Facial Recognition",
- "name": "facial-recognition",
+ "name": "holec_trading",
  "owner": "Administrator",
- "page_name": "facial-recognition",
- "roles": [
-  {}
- ],
+ "page_name": "holec_trading",
+ "roles": [],
  "script": null,
  "standard": "Yes",
  "style": null,
  "system_page": 0,
- "title": "Facial Recognition"
+ "title": "Holec Trading"
 }
